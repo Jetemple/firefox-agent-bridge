@@ -33,6 +33,14 @@
       "tools/reload.js",
       "tools/back.js",
       "tools/forward.js",
+      "tools/press-key.js",
+      "tools/scroll.js",
+      "tools/hover.js",
+      "tools/double-click.js",
+      "tools/right-click.js",
+      "tools/drag.js",
+      "tools/select-option.js",
+      "tools/set-checkbox.js",
       "background.js"
     ],
     "persistent": true

@@ -131,6 +131,97 @@ export const TOOLS = [
     description: "Navigate a tab forward in its session history. Omit tabId for the active tab.",
     inputSchema: { tabId },
   },
+  {
+    name: "press_key",
+    description:
+      "Dispatch a key press to the focused element (e.g. 'Enter', 'Escape', 'Tab', 'ArrowDown', or a single character). Synthetic event — drives page handlers, not native browser shortcuts.",
+    inputSchema: {
+      tabId,
+      key: z.string().describe("Key value, e.g. 'Enter', 'Escape', 'ArrowDown', or 'a'."),
+      ctrl: z.boolean().describe("Hold Ctrl. Default: false.").optional(),
+      alt: z.boolean().describe("Hold Alt. Default: false.").optional(),
+      shift: z.boolean().describe("Hold Shift. Default: false.").optional(),
+      meta: z.boolean().describe("Hold Meta/Cmd. Default: false.").optional(),
+    },
+  },
+  {
+    name: "scroll",
+    description:
+      "Scroll the page by a pixel delta (dx/dy), or scroll an element into view by CSS selector.",
+    inputSchema: {
+      tabId,
+      dx: z.number().describe("Horizontal pixels to scroll by. Default: 0.").optional(),
+      dy: z
+        .number()
+        .describe("Vertical pixels to scroll by (positive = down). Default: 0.")
+        .optional(),
+      selector: z
+        .string()
+        .describe("If given, scroll this element into view instead of by delta.")
+        .optional(),
+    },
+  },
+  {
+    name: "hover",
+    description: "Move the pointer over the element at viewport coordinates (x, y).",
+    inputSchema: {
+      tabId,
+      x: z.number().describe("X coordinate in viewport pixels"),
+      y: z.number().describe("Y coordinate in viewport pixels"),
+    },
+  },
+  {
+    name: "double_click",
+    description: "Double-click at viewport coordinates (x, y).",
+    inputSchema: {
+      tabId,
+      x: z.number().describe("X coordinate in viewport pixels"),
+      y: z.number().describe("Y coordinate in viewport pixels"),
+    },
+  },
+  {
+    name: "right_click",
+    description: "Right-click (open the context menu) at viewport coordinates (x, y).",
+    inputSchema: {
+      tabId,
+      x: z.number().describe("X coordinate in viewport pixels"),
+      y: z.number().describe("Y coordinate in viewport pixels"),
+    },
+  },
+  {
+    name: "drag",
+    description: "Press at (fromX, fromY), move, and release at (toX, toY).",
+    inputSchema: {
+      tabId,
+      fromX: z.number().describe("Source X in viewport pixels"),
+      fromY: z.number().describe("Source Y in viewport pixels"),
+      toX: z.number().describe("Destination X in viewport pixels"),
+      toY: z.number().describe("Destination Y in viewport pixels"),
+    },
+  },
+  {
+    name: "select_option",
+    description:
+      "Choose an <option> in a <select>. Match by `value` or by visible `label` (provide at least one).",
+    inputSchema: {
+      tabId,
+      selector: z.string().describe("CSS selector for the <select> element"),
+      value: z.string().describe("Option value to select.").optional(),
+      label: z
+        .string()
+        .describe("Visible option text to select (used if value is omitted).")
+        .optional(),
+    },
+  },
+  {
+    name: "set_checkbox",
+    description: "Set a checkbox or radio input's checked state by CSS selector.",
+    inputSchema: {
+      tabId,
+      selector: z.string().describe("CSS selector for the checkbox/radio input"),
+      checked: z.boolean().describe("Desired checked state"),
+    },
+  },
 ];
 
 // Tools dispatched to the Firefox extension over the WebSocket relay.

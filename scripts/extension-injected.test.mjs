@@ -28,6 +28,14 @@ function loadInjected() {
     "tools/get-page-text.js",
     "tools/screenshot.js",
     "tools/javascript-tool.js",
+    "tools/press-key.js",
+    "tools/scroll.js",
+    "tools/hover.js",
+    "tools/double-click.js",
+    "tools/right-click.js",
+    "tools/drag.js",
+    "tools/select-option.js",
+    "tools/set-checkbox.js",
   ]) {
     vm.runInContext(readFileSync(resolve(EXT, file), "utf8"), sandbox, { filename: file });
   }
@@ -206,4 +214,201 @@ test("runUserCode is self-contained and evaluates the code string", () => {
   const obj = fn("({ a: 1, b: 2 })");
   assert.equal(obj.a, 1);
   assert.equal(obj.b, 2);
+});
+
+// --- group B: injected interaction tools ------------------------------------
+
+test("performPressKey dispatches keydown/keyup on the active element with modifiers", () => {
+  const events = [];
+  const el = { tagName: "INPUT", id: "q", classList: { length: 0 }, dispatchEvent: (e) => events.push(e) };
+  const fn = reserialize(injected.performPressKey, {
+    document: { activeElement: el, body: {} },
+    KeyboardEvent: FakeEvent,
+  });
+  const res = fn("Enter", { ctrl: true });
+  assert.equal(res.pressed, true);
+  assert.equal(res.key, "Enter");
+  assert.deepEqual(events.map((e) => e.type), ["keydown", "keyup"]); // multi-char key → no keypress
+  assert.equal(events[0].ctrlKey, true);
+});
+
+test("performPressKey emits keypress for a single printable character", () => {
+  const events = [];
+  const el = { tagName: "INPUT", id: "", classList: { length: 0 }, dispatchEvent: (e) => events.push(e) };
+  const fn = reserialize(injected.performPressKey, {
+    document: { activeElement: el, body: {} },
+    KeyboardEvent: FakeEvent,
+  });
+  fn("a", {});
+  assert.deepEqual(events.map((e) => e.type), ["keydown", "keypress", "keyup"]);
+});
+
+test("performScroll scrolls the window by a delta", () => {
+  let by = null;
+  const fn = reserialize(injected.performScroll, {
+    window: { scrollX: 0, scrollY: 500, scrollBy: (x, y) => (by = [x, y]) },
+  });
+  const res = fn(0, 500, null);
+  assert.deepEqual(by, [0, 500]);
+  assert.equal(res.scrolled, true);
+  assert.equal(res.y, 500);
+});
+
+test("performScroll scrolls an element into view when given a selector", () => {
+  let scrolled = null;
+  const el = { scrollIntoView: () => (scrolled = true) };
+  const fn = reserialize(injected.performScroll, {
+    window: { scrollX: 0, scrollY: 0 },
+    document: { querySelector: (s) => (s === "#target" ? el : null) },
+  });
+  const res = fn(0, 0, "#target");
+  assert.equal(scrolled, true);
+  assert.equal(res.into, "#target");
+});
+
+test("performHover dispatches mouseover at the element under the point", () => {
+  const events = [];
+  const target = { tagName: "A", id: "lnk", classList: { length: 0 }, dispatchEvent: (e) => events.push(e.type) };
+  const fn = reserialize(injected.performHover, {
+    document: { elementFromPoint: () => target },
+    PointerEvent: FakeEvent,
+    MouseEvent: FakeEvent,
+  });
+  const res = fn(10, 20);
+  assert.equal(res.hovered, true);
+  assert.equal(res.element, "a#lnk");
+  assert.ok(events.includes("mouseover"));
+});
+
+test("performHover reports when nothing is at the coordinates", () => {
+  const fn = reserialize(injected.performHover, {
+    document: { elementFromPoint: () => null },
+    PointerEvent: FakeEvent,
+    MouseEvent: FakeEvent,
+  });
+  assert.equal(fn(1, 1).hovered, false);
+});
+
+test("performDoubleClick fires two click sequences and a dblclick", () => {
+  const events = [];
+  const target = { tagName: "BUTTON", id: "", classList: { length: 0 }, dispatchEvent: (e) => events.push(e.type) };
+  const fn = reserialize(injected.performDoubleClick, {
+    document: { elementFromPoint: () => target },
+    PointerEvent: FakeEvent,
+    MouseEvent: FakeEvent,
+  });
+  const res = fn(5, 6);
+  assert.equal(res.doubleClicked, true);
+  assert.equal(events.filter((t) => t === "click").length, 2);
+  assert.equal(events.filter((t) => t === "dblclick").length, 1);
+});
+
+test("performRightClick dispatches a contextmenu with button 2", () => {
+  const events = [];
+  const target = { tagName: "DIV", id: "", classList: { length: 0 }, dispatchEvent: (e) => events.push(e) };
+  const fn = reserialize(injected.performRightClick, {
+    document: { elementFromPoint: () => target },
+    PointerEvent: FakeEvent,
+    MouseEvent: FakeEvent,
+  });
+  const res = fn(3, 4);
+  assert.equal(res.rightClicked, true);
+  const ctx = events.find((e) => e.type === "contextmenu");
+  assert.ok(ctx);
+  assert.equal(ctx.button, 2);
+});
+
+test("performDrag presses at the source and releases at the destination", () => {
+  const events = [];
+  const from = { tagName: "DIV", id: "a", classList: { length: 0 }, dispatchEvent: (e) => events.push(["from", e.type, e.clientX, e.clientY]) };
+  const to = { tagName: "DIV", id: "b", classList: { length: 0 }, dispatchEvent: (e) => events.push(["to", e.type, e.clientX, e.clientY]) };
+  const fn = reserialize(injected.performDrag, {
+    document: { elementFromPoint: (x) => (x === 0 ? from : to) },
+    PointerEvent: FakeEvent,
+    MouseEvent: FakeEvent,
+  });
+  const res = fn(0, 0, 100, 200);
+  assert.equal(res.dragged, true);
+  assert.equal(res.from, "div#a");
+  assert.equal(res.to, "div#b");
+  assert.ok(events.some(([who, type]) => who === "from" && type === "mousedown"));
+  assert.ok(events.some(([who, type, cx, cy]) => who === "to" && type === "mouseup" && cx === 100 && cy === 200));
+});
+
+test("performSelectOption sets a <select> value by option value", () => {
+  const events = [];
+  const select = {
+    tagName: "SELECT",
+    id: "s",
+    classList: { length: 0 },
+    options: [{ value: "a", textContent: "Apple" }, { value: "b", textContent: "Banana" }],
+    value: "a",
+    dispatchEvent: (e) => events.push(e.type),
+  };
+  const fn = reserialize(injected.performSelectOption, {
+    document: { querySelector: () => select },
+    Event: FakeEvent,
+  });
+  const res = fn("#s", "b", null);
+  assert.equal(res.selected, true);
+  assert.equal(select.value, "b");
+  assert.ok(events.includes("change"));
+});
+
+test("performSelectOption matches by visible label when value is omitted", () => {
+  const select = {
+    tagName: "SELECT",
+    id: "",
+    classList: { length: 0 },
+    options: [{ value: "1", textContent: "One" }, { value: "2", textContent: "Two" }],
+    value: "1",
+    dispatchEvent: () => {},
+  };
+  const fn = reserialize(injected.performSelectOption, {
+    document: { querySelector: () => select },
+    Event: FakeEvent,
+  });
+  assert.equal(fn("#s", null, "Two").value, "2");
+});
+
+test("performSelectOption refuses a non-select element", () => {
+  const div = { tagName: "DIV", id: "", classList: { length: 0 } };
+  const fn = reserialize(injected.performSelectOption, {
+    document: { querySelector: () => div },
+    Event: FakeEvent,
+  });
+  assert.equal(fn("#x", "a", null).selected, false);
+});
+
+test("performSetCheckbox checks an unchecked box and fires change", () => {
+  const events = [];
+  const box = { type: "checkbox", tagName: "INPUT", id: "c", classList: { length: 0 }, checked: false, dispatchEvent: (e) => events.push(e.type) };
+  const fn = reserialize(injected.performSetCheckbox, {
+    document: { querySelector: () => box },
+    Event: FakeEvent,
+  });
+  const res = fn("#c", true);
+  assert.equal(res.set, true);
+  assert.equal(box.checked, true);
+  assert.ok(events.includes("change"));
+});
+
+test("performSetCheckbox is a no-op when already in the desired state", () => {
+  const events = [];
+  const box = { type: "checkbox", tagName: "INPUT", id: "", classList: { length: 0 }, checked: true, dispatchEvent: (e) => events.push(e.type) };
+  const fn = reserialize(injected.performSetCheckbox, {
+    document: { querySelector: () => box },
+    Event: FakeEvent,
+  });
+  fn("#c", true);
+  assert.deepEqual(events, []);
+});
+
+test("performSetCheckbox refuses a non-checkbox element", () => {
+  const txt = { type: "text", tagName: "INPUT", id: "", classList: { length: 0 } };
+  const fn = reserialize(injected.performSetCheckbox, {
+    document: { querySelector: () => txt },
+    Event: FakeEvent,
+  });
+  assert.equal(fn("#t", true).set, false);
 });

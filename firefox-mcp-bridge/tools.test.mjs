@@ -18,6 +18,15 @@ const EXPECTED = [
   "reload",
   "back",
   "forward",
+  // group B — injected interaction tools
+  "press_key",
+  "scroll",
+  "hover",
+  "double_click",
+  "right_click",
+  "drag",
+  "select_option",
+  "set_checkbox",
 ];
 
 test("TOOLS defines exactly the expected spec tools", () => {
@@ -74,4 +83,19 @@ test("group A tab tools take an optional tabId; reload adds optional bypassCache
   }
   assert.equal(byName.reload.inputSchema.bypassCache.parse(true), true);
   assert.equal(byName.reload.inputSchema.bypassCache.parse(undefined), undefined);
+});
+
+test("group B interaction tools expose their coordinate / key / selector inputs", () => {
+  for (const n of ["hover", "double_click", "right_click"]) {
+    assert.equal(byName[n].inputSchema.x.parse(3), 3);
+    assert.equal(byName[n].inputSchema.y.parse(4), 4);
+  }
+  assert.equal(byName.drag.inputSchema.fromX.parse(1), 1);
+  assert.equal(byName.drag.inputSchema.toY.parse(2), 2);
+  assert.equal(byName.press_key.inputSchema.key.parse("Enter"), "Enter");
+  assert.equal(byName.press_key.inputSchema.ctrl.parse(undefined), undefined);
+  assert.equal(byName.scroll.inputSchema.dy.parse(100), 100);
+  assert.equal(byName.scroll.inputSchema.selector.parse(undefined), undefined);
+  assert.equal(byName.select_option.inputSchema.selector.parse("#s"), "#s");
+  assert.equal(byName.set_checkbox.inputSchema.checked.parse(true), true);
 });
