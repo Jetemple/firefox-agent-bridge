@@ -27,6 +27,10 @@ const EXPECTED = [
   "drag",
   "select_option",
   "set_checkbox",
+  // group C — injected query tools
+  "find_element",
+  "get_links",
+  "get_tables",
 ];
 
 test("TOOLS defines exactly the expected spec tools", () => {
@@ -98,4 +102,12 @@ test("group B interaction tools expose their coordinate / key / selector inputs"
   assert.equal(byName.scroll.inputSchema.selector.parse(undefined), undefined);
   assert.equal(byName.select_option.inputSchema.selector.parse("#s"), "#s");
   assert.equal(byName.set_checkbox.inputSchema.checked.parse(true), true);
+});
+
+test("group C query tools expose their selector / text / max inputs", () => {
+  assert.equal(byName.find_element.inputSchema.text.parse(undefined), undefined);
+  assert.equal(byName.find_element.inputSchema.selector.parse("a.cta"), "a.cta");
+  assert.equal(byName.get_links.inputSchema.max.parse(10), 10);
+  assert.equal(byName.get_links.inputSchema.max.parse(undefined), undefined);
+  assert.equal(byName.get_tables.inputSchema.max.parse(undefined), undefined);
 });

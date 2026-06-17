@@ -36,6 +36,9 @@ function loadInjected() {
     "tools/drag.js",
     "tools/select-option.js",
     "tools/set-checkbox.js",
+    "tools/find-element.js",
+    "tools/get-links.js",
+    "tools/get-tables.js",
   ]) {
     vm.runInContext(readFileSync(resolve(EXT, file), "utf8"), sandbox, { filename: file });
   }
@@ -411,4 +414,59 @@ test("performSetCheckbox refuses a non-checkbox element", () => {
     Event: FakeEvent,
   });
   assert.equal(fn("#t", true).set, false);
+});
+
+// --- group C: injected query tools ------------------------------------------
+
+// Injected functions return objects from the vm realm; normalize before deep
+// comparison (primitive field reads are fine as-is).
+const plain = (v) => JSON.parse(JSON.stringify(v));
+
+test("findElement locates the first visible text match and returns center coords", () => {
+  const make = (tag, txt, rect) => ({
+    tagName: tag,
+    id: "",
+    classList: { length: 0 },
+    innerText: txt,
+    getBoundingClientRect: () => rect,
+  });
+  const a = make("A", "Sign up", { left: 10, top: 20, width: 100, height: 40 });
+  const b = make("BUTTON", "Log in", { left: 0, top: 0, width: 50, height: 20 });
+  const fn = reserialize(injected.findElement, {
+    document: { querySelectorAll: () => [a, b] },
+  });
+  const res = fn("sign up", null);
+  assert.equal(res.found, true);
+  assert.equal(res.element, "a");
+  assert.equal(res.x, 60); // 10 + 100/2
+  assert.equal(res.y, 40); // 20 + 40/2
+  assert.equal(res.count, 1);
+});
+
+test("findElement reports not found when nothing matches", () => {
+  const fn = reserialize(injected.findElement, { document: { querySelectorAll: () => [] } });
+  assert.equal(fn("nope", null).found, false);
+});
+
+test("getLinks returns anchor text and href, honoring max", () => {
+  const mk = (t, h) => ({ innerText: t, textContent: t, href: h });
+  const anchors = [mk("Home", "https://x/"), mk("Docs", "https://x/docs"), mk("API", "https://x/api")];
+  const fn = reserialize(injected.getLinks, { document: { querySelectorAll: () => anchors } });
+  const res = fn(2);
+  assert.equal(res.links.length, 2);
+  assert.deepEqual(plain(res.links[0]), { text: "Home", href: "https://x/" });
+  assert.equal(res.count, 3);
+  assert.equal(res.truncated, true);
+});
+
+test("getTables extracts rows of cell text", () => {
+  const cell = (t) => ({ innerText: t, textContent: t });
+  const row = (cells) => ({ querySelectorAll: () => cells.map(cell) });
+  const table = { querySelectorAll: (sel) => (sel === "tr" ? [row(["A", "B"]), row(["1", "2"])] : []) };
+  const fn = reserialize(injected.getTables, {
+    document: { querySelectorAll: (sel) => (sel === "table" ? [table] : []) },
+  });
+  const res = fn(null);
+  assert.equal(res.count, 1);
+  assert.deepEqual(plain(res.tables[0]), [["A", "B"], ["1", "2"]]);
 });

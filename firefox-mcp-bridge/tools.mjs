@@ -222,6 +222,38 @@ export const TOOLS = [
       checked: z.boolean().describe("Desired checked state"),
     },
   },
+  {
+    name: "find_element",
+    description:
+      "Find the first visible element matching a CSS selector and/or visible text, returning its center (x, y) so you can click/hover it. Provide selector, text, or both.",
+    inputSchema: {
+      tabId,
+      text: z
+        .string()
+        .describe("Visible text (or aria-label) to match, case-insensitive.")
+        .optional(),
+      selector: z
+        .string()
+        .describe("CSS selector to match (scopes the search when combined with text).")
+        .optional(),
+    },
+  },
+  {
+    name: "get_links",
+    description: "List the page's links as { text, href }.",
+    inputSchema: {
+      tabId,
+      max: z.number().describe("Maximum number of links to return.").optional(),
+    },
+  },
+  {
+    name: "get_tables",
+    description: "Extract the page's tables as arrays of rows of cell text.",
+    inputSchema: {
+      tabId,
+      max: z.number().describe("Maximum number of tables to return.").optional(),
+    },
+  },
 ];
 
 // Tools dispatched to the Firefox extension over the WebSocket relay.

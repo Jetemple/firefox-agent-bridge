@@ -41,6 +41,9 @@
       "tools/drag.js",
       "tools/select-option.js",
       "tools/set-checkbox.js",
+      "tools/find-element.js",
+      "tools/get-links.js",
+      "tools/get-tables.js",
       "background.js"
     ],
     "persistent": true
