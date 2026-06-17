@@ -1,0 +1,39 @@
+{
+  "manifest_version": 2,
+  "name": "Claude Firefox Bridge",
+  "version": "0.2.0",
+  "description": "Lets Claude Desktop drive Firefox via a local MCP bridge over WebSocket.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "claude-firefox-bridge@local",
+      "strict_min_version": "128.0"
+    }
+  },
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "activeTab",
+    "alarms",
+    "<all_urls>"
+  ],
+  "content_security_policy": "script-src 'self'; object-src 'self';",
+  "background": {
+    "scripts": [
+      "restricted.js",
+      "tools/tabs-summary.js",
+      "tools/navigate.js",
+      "tools/screenshot.js",
+      "tools/get-page-text.js",
+      "tools/click.js",
+      "tools/type.js",
+      "tools/javascript-tool.js",
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "browser_action": {
+    "default_title": "Claude Firefox Bridge",
+    "default_popup": "panel.html"
+  }
+}

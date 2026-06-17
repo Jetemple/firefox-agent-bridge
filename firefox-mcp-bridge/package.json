@@ -1,0 +1,19 @@
+{
+  "name": "firefox-mcp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Owned MCP bridge: relays Claude Desktop tool calls over a local WebSocket to a Firefox extension.",
+  "bin": {
+    "firefox-mcp-bridge": "./index.mjs"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node --test *.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.21.0",
+    "zod": "^3.25.0"
+  }
+}
