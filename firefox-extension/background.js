@@ -85,7 +85,15 @@ async function resolveTab(tabId) {
 FF.resolveTab = resolveTab;
 
 // Tools that need no tab resolution.
-const NO_TAB = new Set(["get_tabs_summary", "navigate"]);
+const NO_TAB = new Set([
+  "get_tabs_summary",
+  "navigate",
+  "close_tab",
+  "activate_tab",
+  "reload",
+  "back",
+  "forward",
+]);
 // Tools that need the resolved tab (for windowId/activation) but are allowed on
 // restricted URLs (captureVisibleTab does not inject script).
 const SKIP_RESTRICTED = new Set(["screenshot"]);

@@ -100,6 +100,37 @@ export const TOOLS = [
         .optional(),
     },
   },
+  {
+    name: "close_tab",
+    description: "Close a tab. Specify tabId; omit to close the active tab.",
+    inputSchema: { tabId },
+  },
+  {
+    name: "activate_tab",
+    description: "Bring a tab to the foreground (activate it and focus its window).",
+    inputSchema: { tabId },
+  },
+  {
+    name: "reload",
+    description: "Reload a tab. Omit tabId to reload the active tab.",
+    inputSchema: {
+      tabId,
+      bypassCache: z
+        .boolean()
+        .describe("Bypass the cache (hard reload). Default: false.")
+        .optional(),
+    },
+  },
+  {
+    name: "back",
+    description: "Navigate a tab back in its session history. Omit tabId for the active tab.",
+    inputSchema: { tabId },
+  },
+  {
+    name: "forward",
+    description: "Navigate a tab forward in its session history. Omit tabId for the active tab.",
+    inputSchema: { tabId },
+  },
 ];
 
 // Tools dispatched to the Firefox extension over the WebSocket relay.

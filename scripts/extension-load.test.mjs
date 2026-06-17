@@ -14,6 +14,7 @@ import vm from "node:vm";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { WS_TOOL_NAMES } from "../firefox-mcp-bridge/tools.mjs";
 
 const EXT = resolve(dirname(fileURLToPath(import.meta.url)), "../firefox-extension");
 
@@ -35,7 +36,7 @@ test("background scripts parse together with no top-level redeclaration", () => 
   );
 });
 
-test("background scripts fully load: 7 tool handlers + onMessage listener register", () => {
+test("background scripts fully load: every WS tool handler + onMessage listener register", () => {
   const sandbox = {
     WebSocket: class {
       constructor(url) {
@@ -74,16 +75,11 @@ test("background scripts fully load: 7 tool handlers + onMessage listener regist
 
   assert.doesNotThrow(() => vm.runInContext(concatenatedSource(), sandbox), "background load must not throw");
 
-  const expected = [
-    "click",
-    "get_page_text",
-    "get_tabs_summary",
-    "javascript_tool",
-    "navigate",
-    "screenshot",
-    "type",
-  ];
-  assert.deepEqual(Object.keys(sandbox.FFBridge.tools).sort(), expected);
+  // The extension must implement exactly the tools the bridge dispatches.
+  assert.deepEqual(
+    Object.keys(sandbox.FFBridge.tools).sort(),
+    [...WS_TOOL_NAMES].sort(),
+  );
   assert.equal(typeof sandbox.__onMessage, "function", "onMessage listener must register");
 });
 

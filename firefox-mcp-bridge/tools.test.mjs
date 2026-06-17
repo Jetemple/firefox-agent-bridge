@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { TOOLS, WS_TOOL_NAMES } from "./tools.mjs";
 
 const EXPECTED = [
+  // original 8
   "ping_firefox",
   "get_tabs_summary",
   "navigate",
@@ -11,10 +12,16 @@ const EXPECTED = [
   "click",
   "type",
   "javascript_tool",
+  // group A — tab tools
+  "close_tab",
+  "activate_tab",
+  "reload",
+  "back",
+  "forward",
 ];
 
-test("TOOLS defines exactly the 8 spec tools", () => {
-  assert.equal(TOOLS.length, 8);
+test("TOOLS defines exactly the expected spec tools", () => {
+  assert.equal(TOOLS.length, EXPECTED.length);
   assert.deepEqual(
     TOOLS.map((t) => t.name).sort(),
     [...EXPECTED].sort(),
@@ -51,8 +58,20 @@ test("click inputSchema requires numeric x and y", () => {
   assert.throws(() => click.inputSchema.x.parse("nope"));
 });
 
-test("WS_TOOL_NAMES are the 7 tools dispatched to the extension (ping is bridge-only)", () => {
-  assert.equal(WS_TOOL_NAMES.length, 7);
+test("WS_TOOL_NAMES is every tool except the bridge-only ping_firefox", () => {
+  assert.equal(WS_TOOL_NAMES.length, EXPECTED.length - 1);
   assert.ok(!WS_TOOL_NAMES.includes("ping_firefox"));
   assert.ok(WS_TOOL_NAMES.includes("get_tabs_summary"));
+});
+
+const byName = Object.fromEntries(TOOLS.map((t) => [t.name, t]));
+
+test("group A tab tools take an optional tabId; reload adds optional bypassCache", () => {
+  for (const n of ["close_tab", "activate_tab", "reload", "back", "forward"]) {
+    assert.ok(byName[n], `${n} missing from TOOLS`);
+    assert.equal(byName[n].inputSchema.tabId.parse(undefined), undefined);
+    assert.equal(byName[n].inputSchema.tabId.parse(7), 7);
+  }
+  assert.equal(byName.reload.inputSchema.bypassCache.parse(true), true);
+  assert.equal(byName.reload.inputSchema.bypassCache.parse(undefined), undefined);
 });

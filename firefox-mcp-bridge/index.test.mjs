@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { TOOLS } from "./tools.mjs";
 
 const INDEX = resolve(dirname(fileURLToPath(import.meta.url)), "index.mjs");
 
@@ -17,7 +18,7 @@ async function waitUntil(fn, { timeout = 4000, interval = 20 } = {}) {
   throw new Error("waitUntil timed out");
 }
 
-test("speaks MCP over stdio and lists all 8 tools", async () => {
+test("speaks MCP over stdio and lists every tool", async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [INDEX],
@@ -27,7 +28,7 @@ test("speaks MCP over stdio and lists all 8 tools", async () => {
   await client.connect(transport);
   try {
     const list = await client.listTools();
-    assert.equal(list.tools.length, 8);
+    assert.equal(list.tools.length, TOOLS.length);
     assert.ok(list.tools.some((t) => t.name === "ping_firefox"));
   } finally {
     await client.close();

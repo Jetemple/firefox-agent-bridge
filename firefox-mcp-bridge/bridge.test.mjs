@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { createBridge } from "./bridge.mjs";
+import { TOOLS } from "./tools.mjs";
 
 async function connectClient(relay, opts = {}) {
   const server = createBridge({ relay, ...opts });
@@ -23,10 +24,10 @@ function parseText(result) {
   return JSON.parse(result.content[0].text);
 }
 
-test("the bridge registers all 8 tools", async () => {
+test("the bridge registers every tool defined in TOOLS", async () => {
   const { client, server } = await connectClient(fakeRelay());
   const list = await client.listTools();
-  assert.equal(list.tools.length, 8);
+  assert.equal(list.tools.length, TOOLS.length);
   await server.close();
 });
 

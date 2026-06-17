@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "setup": "bash scripts/setup-firefox-bridge.sh",
-    "test": "node --test firefox-mcp-bridge/*.test.mjs scripts/install-firefox-mcp-bridge.test.mjs scripts/extension-injected.test.mjs scripts/extension-load.test.mjs",
+    "test": "node --test firefox-mcp-bridge/*.test.mjs scripts/*.test.mjs",
     "lint:extension": "npx --yes web-ext@latest lint --source-dir firefox-extension"
   }
 }

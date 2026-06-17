@@ -28,6 +28,11 @@
       "tools/click.js",
       "tools/type.js",
       "tools/javascript-tool.js",
+      "tools/close-tab.js",
+      "tools/activate-tab.js",
+      "tools/reload.js",
+      "tools/back.js",
+      "tools/forward.js",
       "background.js"
     ],
     "persistent": true
