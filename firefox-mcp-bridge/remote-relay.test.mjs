@@ -6,7 +6,7 @@ import { createRemoteRelay, createSwitchableRelay } from "./remote-relay.mjs";
 const TOKEN = "remote-tok";
 
 // Minimal owner stub: /health + /dispatch with the Task 2 response shapes.
-function stubOwner({ extensionConnected = true, onDispatch } = {}) {
+function stubOwner({ extensionConnected = true, onDispatch, rawDispatchResponse } = {}) {
   const requests = [];
   const server = createServer(async (req, res) => {
     const path = new URL(req.url, "http://localhost").pathname;
@@ -20,9 +20,13 @@ function stubOwner({ extensionConnected = true, onDispatch } = {}) {
       for await (const c of req) raw += c;
       const body = JSON.parse(raw);
       requests.push({ headers: req.headers, body });
-      const out = onDispatch ? onDispatch(body) : { result: { echoed: body.tool } };
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(out));
+      if (rawDispatchResponse !== undefined) {
+        res.end(rawDispatchResponse);
+      } else {
+        const out = onDispatch ? onDispatch(body) : { result: { echoed: body.tool } };
+        res.end(JSON.stringify(out));
+      }
       return;
     }
     res.writeHead(404).end();
@@ -53,6 +57,19 @@ test("RemoteRelay rejects with the owner's error object", async () => {
   const relay = createRemoteRelay({ ssePort: owner.port, token: TOKEN, pollMs: 60_000 });
   try {
     await assert.rejects(relay.dispatch("navigate", { url: "x" }), { code: "NO_CLIENT", message: "nope" });
+  } finally {
+    await relay.close();
+    await owner.close();
+  }
+});
+
+test("RemoteRelay rejects malformed dispatch responses with BAD_RESPONSE and does not fire onConnectionLost", async () => {
+  const owner = await stubOwner({ rawDispatchResponse: "not-json{" });
+  let lost = 0;
+  const relay = createRemoteRelay({ ssePort: owner.port, token: TOKEN, pollMs: 60_000, onConnectionLost: () => lost++ });
+  try {
+    await assert.rejects(relay.dispatch("navigate", { url: "x" }), (e) => e.code === "BAD_RESPONSE");
+    assert.equal(lost, 0);
   } finally {
     await relay.close();
     await owner.close();

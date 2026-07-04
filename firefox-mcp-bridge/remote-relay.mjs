@@ -56,6 +56,9 @@ export function createRemoteRelay({
       };
     }
     if (body?.error) throw body.error;
+    if (body === null) {
+      throw { code: "BAD_RESPONSE", message: "owner returned an unparseable dispatch response" };
+    }
     return body.result;
   }
 
