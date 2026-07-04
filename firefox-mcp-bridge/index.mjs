@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createRelay, DEFAULT_PORT, DEFAULT_HOST, DEFAULT_TIMEOUT_MS } from "./ws-relay.mjs";
-import { createBridge } from "./bridge.mjs";
-import { createBridgeHttpServer } from "./http-server.mjs";
+import { createBridge, SERVER_VERSION } from "./bridge.mjs";
+import { createBridgeHttpServer, HEALTH_NAME } from "./http-server.mjs";
+import { createRemoteRelay, createSwitchableRelay } from "./remote-relay.mjs";
 import { sseInsecureWarning } from "./sse-auth.mjs";
 import { loadOrCreateToken, DEFAULT_TOKEN_PATH } from "../scripts/secure-config.mjs";
 import { execSync } from "node:child_process";
@@ -19,23 +20,65 @@ function logErr(message) {
   process.stderr.write(`[firefox-mcp-bridge] ${message}\n`);
 }
 
-function killStaleBridge(port) {
+// Enumerate the processes listening on `port`, pairing each lsof PID with its
+// full `ps` command line so callers can tell a bridge instance apart from an
+// unrelated program that happens to hold the port.
+export function inspectPortHolders(port, { execFn = execSync } = {}) {
+  let out = "";
   try {
-    const out = execSync(`lsof -tiTCP:${port} -sTCP:LISTEN`, { encoding: "utf8" });
-    const pids = out
-      .trim()
-      .split("\n")
-      .map(Number)
-      .filter((p) => p && p !== process.pid);
-    for (const pid of pids) {
+    out = String(execFn(`lsof -tiTCP:${port} -sTCP:LISTEN`, { encoding: "utf8" }));
+  } catch {
+    return [];
+  }
+  const pids = out
+    .trim()
+    .split("\n")
+    .map(Number)
+    .filter((p) => p && p !== process.pid);
+  return pids.map((pid) => {
+    let command = "";
+    try {
+      command = String(execFn(`ps -o command= -p ${pid}`, { encoding: "utf8" })).trim();
+    } catch {
+      /* pid vanished */
+    }
+    return { pid, command };
+  });
+}
+
+// Only ever SIGTERM a process we can prove is another bridge instance.
+export function isBridgeCommand(command) {
+  return /firefox-mcp-bridge[/\\]index\.mjs/.test(command ?? "");
+}
+
+export function killStaleBridge(port, { execFn = execSync, log = () => {} } = {}) {
+  const killed = [];
+  const foreign = [];
+  for (const { pid, command } of inspectPortHolders(port, { execFn })) {
+    if (isBridgeCommand(command)) {
       try {
         process.kill(pid, "SIGTERM");
-        logErr(`killed stale bridge PID ${pid}`);
-      } catch {}
+        killed.push(pid);
+        log(`killed stale bridge PID ${pid}`);
+      } catch {
+        /* already gone */
+      }
+    } else {
+      foreign.push(pid);
     }
-    return pids.length > 0;
+  }
+  return { killed, foreign };
+}
+
+export async function probeBridgeHealth({ ssePort, sseHost = "127.0.0.1", fetchFn = fetch } = {}) {
+  try {
+    const res = await fetchFn(`http://${sseHost}:${ssePort}/health`, {
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return null;
+    return await res.json();
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -114,33 +157,107 @@ async function main() {
   // startedAt must be fixed before startOwner: it seeds the /health uptime.
   const startedAt = Date.now();
 
-  // Interim ownership (follower mode arrives in Task 5): keep bindOrRetry's
-  // kill-then-retry semantics, but through startOwner so BOTH ports are claimed
-  // together. Only a WS-port EADDRINUSE triggers the retry; an HTTP bind failure
-  // (HTTP_BIND_FAILED, WS already released) is fatal with an actionable message.
-  let owner;
+  // shuttingDown is hoisted above requestPromotion so a poll tick that fires
+  // during shutdown can't kick off a doomed promotion.
+  let shuttingDown = false;
+  let ownerParts = null;
+  let role = null;
+  let requestPromotion = () => {}; // bound after the façade exists
+
+  // Claim BOTH ports and start serving as the owner. Also used by promotion.
+  async function becomeOwner() {
+    ownerParts = await startOwner(config, fileToken, { startedAt, log: logErr });
+    role = "owner";
+    logErr(
+      `listening on ws://${config.host}:${ownerParts.relay.port} (per-request timeout ${config.timeoutMs}ms)`,
+    );
+    logErr(`HTTP endpoint at http://${config.sseHost}:${config.ssePort} (/mcp, /health, /dispatch)`);
+    const warning = sseInsecureWarning({ sseHost: config.sseHost, sseToken: config.sseToken });
+    if (warning) logErr(`⚠ ${warning}`);
+    return ownerParts.relay;
+  }
+
+  let inner;
   try {
-    owner = await startOwner(config, fileToken, { startedAt, log: logErr });
+    inner = await becomeOwner();
   } catch (err) {
+    if (err?.code === "HTTP_BIND_FAILED") {
+      logErr(err.message);
+      process.exit(1);
+    }
     if (err?.code !== "EADDRINUSE") {
       logErr(`fatal: ${err?.message ?? err}`);
       process.exit(1);
     }
-    logErr("port in use — killing stale bridge instance");
-    killStaleBridge(config.port);
-    await delay(800);
-    try {
-      owner = await startOwner(config, fileToken, { startedAt, log: logErr });
-    } catch (err2) {
-      logErr(`fatal: ${err2?.message ?? err2}`);
-      process.exit(1);
+    // WS port is taken. Probe /health: a healthy bridge means we follow it; an
+    // unresponsive one means the holder is stale (kill it) or foreign (bail).
+    const health = await probeBridgeHealth({ ssePort: config.ssePort, sseHost: "127.0.0.1" });
+    if (health?.name === HEALTH_NAME) {
+      if (standalone) {
+        logErr(`bridge already running (pid ${health.pid}) — nothing to do`);
+        process.exit(0);
+      }
+      if (health.version !== SERVER_VERSION) {
+        logErr(
+          `⚠ owner is version ${health.version}, this instance is ${SERVER_VERSION} — tool lists may drift`,
+        );
+      }
+      role = "follower";
+      inner = createRemoteRelay({
+        ssePort: config.ssePort,
+        token: fileToken,
+        onConnectionLost: () => requestPromotion(),
+        log: logErr,
+      });
+      await inner.probe(); // seed extensionConnected so clientCount() is honest immediately
+      logErr(`following existing bridge (pid ${health.pid})`);
+    } else {
+      const { foreign } = killStaleBridge(config.port, { log: logErr });
+      if (foreign.length) {
+        logErr(
+          `port ${config.port} is held by non-bridge process(es) ${foreign.join(", ")} — ` +
+            `refusing to kill; free the port or set FIREFOX_BRIDGE_WS_PORT`,
+        );
+        process.exit(1);
+      }
+      await delay(800);
+      try {
+        inner = await becomeOwner();
+      } catch (err2) {
+        logErr(`fatal: ${err2?.message ?? err2}`);
+        process.exit(1);
+      }
     }
   }
-  const relay = owner.relay;
-  logErr(`listening on ws://${config.host}:${relay.port} (per-request timeout ${config.timeoutMs}ms)`);
-  logErr(`HTTP endpoint at http://${config.sseHost}:${config.ssePort} (/mcp, /health, /dispatch)`);
-  const warning = sseInsecureWarning({ sseHost: config.sseHost, sseToken: config.sseToken });
-  if (warning) logErr(`⚠ ${warning}`);
+
+  // createBridge and the (owner) HTTP server both close over this façade, so
+  // promotion can swap RemoteRelay -> local WS relay without touching sessions.
+  const relay = createSwitchableRelay(inner);
+
+  // Promote a follower to owner once the previous owner disappears. Idempotent:
+  // onConnectionLost can fire many times per outage (per failed dispatch + per
+  // poll tick), so guard on `promoting`, the current role, and shutdown.
+  let promoting = false;
+  requestPromotion = async () => {
+    if (promoting || role === "owner" || shuttingDown) return;
+    promoting = true;
+    try {
+      const newRelay = await becomeOwner(); // throws EADDRINUSE if another follower won
+      const old = relay.swap(newRelay);
+      try {
+        await old.close();
+      } catch {
+        /* ignore */
+      }
+      logErr("promoted to owner — waiting for the extension to reconnect");
+    } catch (err) {
+      if (err?.code !== "EADDRINUSE") logErr(`promotion failed: ${err?.message ?? err}`);
+      // Lost the race (or transient) — stay follower. RemoteRelay targets the
+      // fixed port, so the new owner is reached automatically on the next poll.
+    } finally {
+      promoting = false;
+    }
+  };
 
   // standalone gates only the stdio transport now; HTTP is mandatory for everyone.
   let server = null;
@@ -150,14 +267,16 @@ async function main() {
     transport = new StdioServerTransport();
   }
 
-  let shuttingDown = false;
   async function shutdown(reason) {
     if (shuttingDown) return;
     shuttingDown = true;
     logErr(`shutting down (${reason})`);
     setTimeout(() => process.exit(0), 1000).unref();
     try {
-      await owner.close();
+      // Reflect post-promotion state: an owner (original or promoted) owns
+      // ownerParts; a follower only holds the RemoteRelay behind the façade.
+      if (role === "owner" && ownerParts) await ownerParts.close();
+      else await relay.close();
       if (server) await server.close();
     } catch (err) {
       logErr(`error during shutdown: ${err?.message ?? err}`);
