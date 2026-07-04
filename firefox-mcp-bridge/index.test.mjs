@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, join } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { TOOLS } from "./tools.mjs";
@@ -19,10 +21,12 @@ async function waitUntil(fn, { timeout = 4000, interval = 20 } = {}) {
 }
 
 test("speaks MCP over stdio and lists every tool", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ffmcp-"));
+  const tokenFile = join(dir, "token");
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [INDEX],
-    env: { ...getDefaultEnvironment(), FIREFOX_BRIDGE_WS_PORT: "0" },
+    env: { ...getDefaultEnvironment(), FIREFOX_BRIDGE_WS_PORT: "0", FIREFOX_BRIDGE_TOKEN_FILE: tokenFile },
   });
   const client = new Client({ name: "test", version: "0" });
   await client.connect(transport);
@@ -32,12 +36,15 @@ test("speaks MCP over stdio and lists every tool", async () => {
     assert.ok(list.tools.some((t) => t.name === "ping_firefox"));
   } finally {
     await client.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("keeps stdout pure JSON-RPC (logs go to stderr) and exits 0 on SIGTERM", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ffmcp-"));
+  const tokenFile = join(dir, "token");
   const child = spawn(process.execPath, [INDEX], {
-    env: { ...process.env, FIREFOX_BRIDGE_WS_PORT: "0", FIREFOX_BRIDGE_WS_TIMEOUT_MS: "200" },
+    env: { ...process.env, FIREFOX_BRIDGE_WS_PORT: "0", FIREFOX_BRIDGE_WS_TIMEOUT_MS: "200", FIREFOX_BRIDGE_TOKEN_FILE: tokenFile },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";
@@ -81,5 +88,6 @@ test("keeps stdout pure JSON-RPC (logs go to stderr) and exits 0 on SIGTERM", as
     assert.equal(exitCode, 0);
   } finally {
     if (child.exitCode === null) child.kill("SIGKILL");
+    rmSync(dir, { recursive: true, force: true });
   }
 });

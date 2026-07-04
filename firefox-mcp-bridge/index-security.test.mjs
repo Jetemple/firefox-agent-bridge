@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readConfig } from "./index.mjs";
@@ -63,7 +63,8 @@ test("readConfig honors FIREFOX_BRIDGE_TOKEN_FILE", () => {
 
 test("SSE endpoint returns 401 without a token and passes auth with it", async () => {
   const port = await freePort();
-  const tokenFile = join(mkdtempSync(join(tmpdir(), "ffmcp-")), "token");
+  const dir = mkdtempSync(join(tmpdir(), "ffmcp-"));
+  const tokenFile = join(dir, "token");
   const child = spawn(process.execPath, [INDEX], {
     env: {
       ...process.env,
@@ -110,5 +111,6 @@ test("SSE endpoint returns 401 without a token and passes auth with it", async (
     assert.notEqual(withAuth.status, 401, "request with the right token must pass the auth gate");
   } finally {
     child.kill("SIGKILL");
+    rmSync(dir, { recursive: true, force: true });
   }
 });
