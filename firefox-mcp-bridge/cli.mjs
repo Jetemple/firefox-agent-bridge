@@ -32,7 +32,6 @@ function readSettings(env) {
   return {
     ssePort: env.FIREFOX_BRIDGE_SSE_PORT ? Number(env.FIREFOX_BRIDGE_SSE_PORT) : 3003,
     tokenFile: env.FIREFOX_BRIDGE_TOKEN_FILE || DEFAULT_TOKEN_PATH,
-    envToken: env.FIREFOX_BRIDGE_SSE_TOKEN || null,
   };
 }
 
@@ -112,7 +111,16 @@ async function runLifecycle(command, settings, deps) {
       stdout("bridge: not running\n");
       return 0;
     }
-    process.kill(health.pid, "SIGTERM");
+    try {
+      process.kill(health.pid, "SIGTERM");
+    } catch (err) {
+      if (err?.code === "ESRCH") {
+        stdout(`bridge already stopped (pid ${health.pid})\n`);
+        return 0;
+      }
+      stderr(`could not signal bridge (pid ${health.pid}): ${err?.message ?? err}\n`);
+      return 1;
+    }
     const deadline = Date.now() + 3000;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 100));

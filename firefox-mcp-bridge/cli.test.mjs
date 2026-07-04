@@ -13,13 +13,13 @@ function tmpDir() {
 }
 
 // Stub owner with scripted /dispatch results per tool.
-function stubOwner({ results = {}, extensionConnected = true } = {}) {
+function stubOwner({ results = {}, extensionConnected = true, healthPid = process.pid } = {}) {
   const requests = [];
   const server = createServer(async (req, res) => {
     const path = new URL(req.url, "http://localhost").pathname;
     res.setHeader("content-type", "application/json");
     if (path === "/health") {
-      res.end(JSON.stringify({ name: "firefox-mcp-bridge", version: "0.1.0", pid: process.pid, startedAt: 0, extensionConnected }));
+      res.end(JSON.stringify({ name: "firefox-mcp-bridge", version: "0.1.0", pid: healthPid, startedAt: 0, extensionConnected }));
       return;
     }
     if (path === "/dispatch") {
@@ -213,6 +213,24 @@ function freePort() {
     });
   });
 }
+
+test("ff stop handles a stale bridge pid gracefully (process already dead)", async () => {
+  // Spawn a short-lived child to get a genuinely dead pid.
+  const child = realSpawn(process.execPath, ["-e", "setTimeout(() => {}, 100)"]);
+  const deadPid = child.pid;
+  await new Promise((r) => child.once("exit", r));
+
+  // Stub owner reports that (now-dead) pid in its health response.
+  const owner = await stubOwner({ healthPid: deadPid });
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["stop"], c.opts);
+    assert.equal(code, 0);
+    assert.match(c.out.join(""), /already stopped/);
+  } finally {
+    await owner.close();
+  }
+});
 
 test("smoke: ff status + ff tabs against a real standalone bridge (no extension)", async () => {
   const wsPort = await freePort();
