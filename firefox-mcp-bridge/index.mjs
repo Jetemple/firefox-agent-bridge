@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createRelay, DEFAULT_PORT, DEFAULT_HOST, DEFAULT_TIMEOUT_MS } from "./ws-relay.mjs";
 import { createBridge } from "./bridge.mjs";
 import { isSseAuthorized, sseInsecureWarning } from "./sse-auth.mjs";
+import { loadOrCreateToken, DEFAULT_TOKEN_PATH } from "../scripts/secure-config.mjs";
 import { execSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
@@ -74,11 +75,16 @@ export function readConfig(env = process.env) {
   const allowAnyOrigin =
     env.FIREFOX_BRIDGE_WS_ALLOW_ANY_ORIGIN === "1" ||
     env.FIREFOX_BRIDGE_WS_ALLOW_ANY_ORIGIN === "true";
-  return { port, host, timeoutMs, ssePort, sseHost, sseToken, allowAnyOrigin };
+  const tokenFile = env.FIREFOX_BRIDGE_TOKEN_FILE || DEFAULT_TOKEN_PATH;
+  return { port, host, timeoutMs, ssePort, sseHost, sseToken, allowAnyOrigin, tokenFile };
 }
 
 async function main() {
-  const { port, host, timeoutMs, ssePort, sseHost, sseToken, allowAnyOrigin } = readConfig();
+  const { port, host, timeoutMs, ssePort, sseHost, sseToken, allowAnyOrigin, tokenFile } = readConfig();
+  // The local token is ALWAYS provisioned: /dispatch requires it even in
+  // loopback-only mode (a web page can fire no-preflight POSTs at localhost;
+  // it cannot read this 0600 file). The env token (sseToken) governs /mcp only.
+  const fileToken = loadOrCreateToken({ tokenPath: tokenFile });
   const standalone = !!process.env.FIREFOX_BRIDGE_STANDALONE || process.stdin.isTTY === true;
 
   let relay;

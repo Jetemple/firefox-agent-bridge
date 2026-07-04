@@ -4,7 +4,11 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { readConfig } from "./index.mjs";
+import { DEFAULT_TOKEN_PATH } from "../scripts/secure-config.mjs";
 
 const INDEX = resolve(dirname(fileURLToPath(import.meta.url)), "index.mjs");
 
@@ -45,10 +49,21 @@ test("readConfig reads an explicit SSE host and token from env", () => {
   assert.equal(cfg.sseToken, "s3cret");
 });
 
+test("readConfig defaults tokenFile to the repo token path", () => {
+  const cfg = readConfig({});
+  assert.equal(cfg.tokenFile, DEFAULT_TOKEN_PATH);
+});
+
+test("readConfig honors FIREFOX_BRIDGE_TOKEN_FILE", () => {
+  const cfg = readConfig({ FIREFOX_BRIDGE_TOKEN_FILE: "/tmp/tok" });
+  assert.equal(cfg.tokenFile, "/tmp/tok");
+});
+
 // --- end-to-end: the live SSE endpoint enforces the token ---
 
 test("SSE endpoint returns 401 without a token and passes auth with it", async () => {
   const port = await freePort();
+  const tokenFile = join(mkdtempSync(join(tmpdir(), "ffmcp-")), "token");
   const child = spawn(process.execPath, [INDEX], {
     env: {
       ...process.env,
@@ -56,6 +71,7 @@ test("SSE endpoint returns 401 without a token and passes auth with it", async (
       FIREFOX_BRIDGE_WS_PORT: "0",
       FIREFOX_BRIDGE_SSE_PORT: String(port),
       FIREFOX_BRIDGE_SSE_TOKEN: "s3cret",
+      FIREFOX_BRIDGE_TOKEN_FILE: tokenFile,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
