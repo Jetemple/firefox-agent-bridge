@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Owned MCP bridge: relays Claude Desktop tool calls over a local WebSocket to a Firefox extension.",
   "bin": {
-    "firefox-mcp-bridge": "./index.mjs"
+    "firefox-mcp-bridge": "./index.mjs",
+    "ff": "./cli.mjs"
   },
   "scripts": {
     "start": "node index.mjs",
