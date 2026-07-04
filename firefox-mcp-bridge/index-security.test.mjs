@@ -81,7 +81,7 @@ test("SSE endpoint returns 401 without a token and passes auth with it", async (
   child.stderr.on("data", (d) => (stderr += d));
 
   try {
-    await waitUntil(() => stderr.includes("SSE endpoint at"));
+    await waitUntil(() => stderr.includes("HTTP endpoint at"));
     const url = `http://127.0.0.1:${port}/mcp`;
     const body = JSON.stringify({
       jsonrpc: "2.0",

@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createRelay, DEFAULT_PORT, DEFAULT_HOST, DEFAULT_TIMEOUT_MS } from "./ws-relay.mjs";
 import { createBridge } from "./bridge.mjs";
-import { isSseAuthorized, sseInsecureWarning } from "./sse-auth.mjs";
+import { createBridgeHttpServer } from "./http-server.mjs";
+import { sseInsecureWarning } from "./sse-auth.mjs";
 import { loadOrCreateToken, DEFAULT_TOKEN_PATH } from "../scripts/secure-config.mjs";
 import { execSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { randomUUID } from "node:crypto";
-import { createServer } from "node:http";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 // stdout is reserved exclusively for the MCP StdioServerTransport. Any stray
@@ -41,22 +39,49 @@ function killStaleBridge(port) {
   }
 }
 
-async function bindOrRetry(port, host, timeoutMs, allowAnyOrigin) {
-  let relay = createRelay({ port, host, timeoutMs, allowAnyOrigin, log: logErr });
+// Ownership = BOTH ports. A WS-only bridge would be invisible to /health
+// probes and would get killed by the next instance as a "zombie", so if the
+// HTTP port can't be bound the instance must not own the relay either.
+export async function startOwner(config, fileToken, { startedAt = Date.now(), log = () => {} } = {}) {
+  const relay = createRelay({
+    port: config.port,
+    host: config.host,
+    timeoutMs: config.timeoutMs,
+    allowAnyOrigin: config.allowAnyOrigin,
+    log,
+  });
+  await relay.ready; // rejects with code EADDRINUSE when the WS port is taken
+  const { server, closeAllSessions } = createBridgeHttpServer({
+    relay,
+    startedAt,
+    fileToken,
+    envToken: config.sseToken,
+    log,
+  });
   try {
-    await relay.ready;
-    return relay;
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(config.ssePort, config.sseHost, resolve);
+    });
   } catch (err) {
-    if (!err || err.code !== "EADDRINUSE") throw err;
+    await relay.close();
+    const e = new Error(
+      `cannot bind HTTP port ${config.ssePort} (${err?.code ?? err}); ` +
+        `ownership requires both ports — free it or set FIREFOX_BRIDGE_SSE_PORT`,
+    );
+    e.code = "HTTP_BIND_FAILED";
+    throw e;
   }
-
-  logErr("port in use — killing stale bridge instance");
-  killStaleBridge(port);
-  await delay(800);
-
-  relay = createRelay({ port, host, timeoutMs, allowAnyOrigin, log: logErr });
-  await relay.ready;
-  return relay;
+  return {
+    relay,
+    server,
+    closeAllSessions,
+    close: async () => {
+      await closeAllSessions();
+      await new Promise((r) => server.close(r));
+      await relay.close();
+    },
+  };
 }
 
 export function readConfig(env = process.env) {
@@ -80,75 +105,49 @@ export function readConfig(env = process.env) {
 }
 
 async function main() {
-  const { port, host, timeoutMs, ssePort, sseHost, sseToken, allowAnyOrigin, tokenFile } = readConfig();
+  const config = readConfig();
   // The local token is ALWAYS provisioned: /dispatch requires it even in
   // loopback-only mode (a web page can fire no-preflight POSTs at localhost;
   // it cannot read this 0600 file). The env token (sseToken) governs /mcp only.
-  const fileToken = loadOrCreateToken({ tokenPath: tokenFile });
+  const fileToken = loadOrCreateToken({ tokenPath: config.tokenFile });
   const standalone = !!process.env.FIREFOX_BRIDGE_STANDALONE || process.stdin.isTTY === true;
-
-  let relay;
-  try {
-    relay = await bindOrRetry(port, host, timeoutMs, allowAnyOrigin);
-    logErr(`listening on ws://${host}:${relay.port} (per-request timeout ${timeoutMs}ms)`);
-  } catch (err) {
-    logErr(`WebSocket server failed to start: ${err?.message ?? err}`);
-    process.exit(1);
-  }
-
+  // startedAt must be fixed before startOwner: it seeds the /health uptime.
   const startedAt = Date.now();
+
+  // Interim ownership (follower mode arrives in Task 5): keep bindOrRetry's
+  // kill-then-retry semantics, but through startOwner so BOTH ports are claimed
+  // together. Only a WS-port EADDRINUSE triggers the retry; an HTTP bind failure
+  // (HTTP_BIND_FAILED, WS already released) is fatal with an actionable message.
+  let owner;
+  try {
+    owner = await startOwner(config, fileToken, { startedAt, log: logErr });
+  } catch (err) {
+    if (err?.code !== "EADDRINUSE") {
+      logErr(`fatal: ${err?.message ?? err}`);
+      process.exit(1);
+    }
+    logErr("port in use — killing stale bridge instance");
+    killStaleBridge(config.port);
+    await delay(800);
+    try {
+      owner = await startOwner(config, fileToken, { startedAt, log: logErr });
+    } catch (err2) {
+      logErr(`fatal: ${err2?.message ?? err2}`);
+      process.exit(1);
+    }
+  }
+  const relay = owner.relay;
+  logErr(`listening on ws://${config.host}:${relay.port} (per-request timeout ${config.timeoutMs}ms)`);
+  logErr(`HTTP endpoint at http://${config.sseHost}:${config.ssePort} (/mcp, /health, /dispatch)`);
+  const warning = sseInsecureWarning({ sseHost: config.sseHost, sseToken: config.sseToken });
+  if (warning) logErr(`⚠ ${warning}`);
+
+  // standalone gates only the stdio transport now; HTTP is mandatory for everyone.
   let server = null;
   let transport = null;
-
   if (!standalone) {
     server = createBridge({ relay, startedAt });
     transport = new StdioServerTransport();
-  }
-
-  let sseServer = null;
-  let sseTransport = null;
-  let sseHttpServer = null;
-
-  try {
-    sseTransport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-    });
-    sseServer = createBridge({ relay, startedAt });
-    await sseServer.connect(sseTransport);
-
-    sseHttpServer = createServer((req, res) => {
-      if (!isSseAuthorized(sseToken, req)) {
-        res.writeHead(401, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "unauthorized" }));
-        return;
-      }
-      sseTransport.handleRequest(req, res);
-    });
-
-    await new Promise((resolve, reject) => {
-      sseHttpServer.once("error", reject);
-      sseHttpServer.listen(ssePort, sseHost, resolve);
-    });
-
-    logErr(`SSE endpoint at http://${sseHost}:${ssePort}/mcp${sseToken ? " (token required)" : ""}`);
-    const warning = sseInsecureWarning({ sseHost, sseToken });
-    if (warning) logErr(`⚠ ${warning}`);
-  } catch (err) {
-    if (sseHttpServer) {
-      try { sseHttpServer.close(); } catch {}
-      sseHttpServer = null;
-    }
-    if (err?.code === "EADDRINUSE") {
-      logErr(`SSE port ${ssePort} in use — running without SSE transport`);
-    } else {
-      logErr(`SSE transport failed: ${err?.message ?? err} — running without SSE`);
-    }
-    sseServer = null;
-    sseTransport = null;
-    if (standalone) {
-      logErr("standalone mode requires SSE, exiting");
-      process.exit(1);
-    }
   }
 
   let shuttingDown = false;
@@ -158,10 +157,7 @@ async function main() {
     logErr(`shutting down (${reason})`);
     setTimeout(() => process.exit(0), 1000).unref();
     try {
-      if (sseTransport) await sseTransport.close();
-      if (sseHttpServer) await new Promise((r) => sseHttpServer.close(r));
-      if (sseServer) await sseServer.close();
-      await relay.close();
+      await owner.close();
       if (server) await server.close();
     } catch (err) {
       logErr(`error during shutdown: ${err?.message ?? err}`);
@@ -181,7 +177,7 @@ async function main() {
   process.on("SIGHUP", () => shutdown("SIGHUP"));
 
   if (standalone) {
-    logErr("standalone mode — running SSE only, Ctrl+C to stop");
+    logErr("standalone mode — running HTTP only, Ctrl+C to stop");
     await new Promise(() => {});
   }
 }

@@ -225,3 +225,68 @@ test("malformed absolute-form request-target does not crash the process; server 
     await close();
   }
 });
+
+// --- per-session /mcp ---
+
+async function mcpInitialize(port, { sessionId } = {}) {
+  const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+  if (sessionId) headers["mcp-session-id"] = sessionId;
+  return fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "t", version: "0" },
+      },
+    }),
+  });
+}
+
+test("/mcp supports two concurrent sessions and rejects unknown session ids", async () => {
+  const relay = stubRelay();
+  const parts = createBridgeHttpServer({ relay, startedAt: 0, fileToken: TOKEN, envToken: null });
+  const { port, close } = await listen(parts);
+  try {
+    const a = await mcpInitialize(port);
+    const b = await mcpInitialize(port);
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200);
+    const sidA = a.headers.get("mcp-session-id");
+    const sidB = b.headers.get("mcp-session-id");
+    assert.ok(sidA && sidB && sidA !== sidB, "two initializes must yield two distinct sessions");
+    assert.equal(parts.sessionCount(), 2);
+
+    const unknown = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-session-id": "no-such-session",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+    });
+    assert.equal(unknown.status, 400);
+
+    await parts.closeAllSessions();
+    assert.equal(parts.sessionCount(), 0);
+  } finally {
+    await close();
+  }
+});
+
+test("/mcp still enforces the env token when configured", async () => {
+  const relay = stubRelay();
+  const parts = createBridgeHttpServer({ relay, startedAt: 0, fileToken: TOKEN, envToken: "env-secret" });
+  const { port, close } = await listen(parts);
+  try {
+    const noAuth = await mcpInitialize(port);
+    assert.equal(noAuth.status, 401);
+  } finally {
+    await close();
+  }
+});
