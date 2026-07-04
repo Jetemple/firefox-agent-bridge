@@ -43,7 +43,8 @@ export function checkDispatchAccess(req, { fileToken, envToken = null } = {}) {
     return { ok: false, status: 415, message: "content-type must be application/json" };
   }
   const authorized =
-    isSseAuthorized(fileToken, req) || (envToken ? isSseAuthorized(envToken, req) : false);
+    (fileToken ? isSseAuthorized(fileToken, req) : false) ||
+    (envToken ? isSseAuthorized(envToken, req) : false);
   if (!authorized) {
     return { ok: false, status: 401, message: "missing or invalid token" };
   }
@@ -93,6 +94,7 @@ function readBody(req) {
 // One HTTP server for /health, /dispatch, and per-session /mcp. `relay` may be
 // the local WS relay or the SwitchableRelay façade — same interface.
 export function createBridgeHttpServer({ relay, startedAt = Date.now(), fileToken, envToken = null, log = () => {} }) {
+  if (!fileToken) throw new Error("createBridgeHttpServer requires a non-empty fileToken");
   const sessions = new Map(); // mcp-session-id -> StreamableHTTPServerTransport
 
   async function handleDispatch(req, res) {
@@ -176,7 +178,15 @@ export function createBridgeHttpServer({ relay, startedAt = Date.now(), fileToke
   }
 
   const server = createServer((req, res) => {
-    const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    let path;
+    try {
+      path = new URL(req.url ?? "/", "http://localhost").pathname;
+    } catch {
+      // Malformed request-target (e.g. an absolute-form URL with an unbalanced
+      // IPv6 bracket) can pass Node's HTTP parser but isn't a valid URL — fail
+      // closed with 400 rather than letting the throw escape unguarded.
+      return sendJson(res, 400, { error: "bad request" });
+    }
     const route =
       path === "/health" && req.method === "GET"
         ? () =>

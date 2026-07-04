@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import net from "node:net";
 import {
   HEALTH_NAME,
   MAX_DISPATCH_TIMEOUT_MS,
@@ -81,6 +82,12 @@ test("dispatch access: the env-configured token is also accepted", () => {
   assert.equal(r.ok, true);
 });
 
+test("dispatch access: a falsy fileToken does not fail open (isSseAuthorized(falsy) would return true)", () => {
+  const r = checkDispatchAccess(fakeReq({ token: null }), { fileToken: "", envToken: null });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 401);
+});
+
 // --- validateDispatchBody ---
 
 test("validateDispatchBody accepts a known tool with valid args and clamps timeout", () => {
@@ -105,6 +112,14 @@ test("validateDispatchBody defaults args to {} for no-schema tools", () => {
   const r = validateDispatchBody({ tool: "get_tabs_summary" });
   assert.equal(r.ok, true);
   assert.deepEqual(r.args, {});
+});
+
+// --- createBridgeHttpServer: fileToken is mandatory ---
+
+test("createBridgeHttpServer throws if fileToken is missing or empty", () => {
+  const relay = stubRelay();
+  assert.throws(() => createBridgeHttpServer({ relay, fileToken: undefined }), /non-empty fileToken/);
+  assert.throws(() => createBridgeHttpServer({ relay, fileToken: "" }), /non-empty fileToken/);
 });
 
 // --- live server: /health and /dispatch ---
@@ -171,6 +186,41 @@ test("/dispatch maps relay rejections to { error } and bad input to 400/401", as
       body: JSON.stringify({ tool: "get_tabs_summary" }),
     });
     assert.equal(noTok.status, 401);
+  } finally {
+    await close();
+  }
+});
+
+// A malformed absolute-form request-target (unbalanced IPv6 bracket) passes
+// Node's HTTP parser but throws out of `new URL(...)`. Confirmed empirically
+// on this Node version (v26.3.0) via a raw socket: req.url arrives as the
+// literal string "http://[::1" and `new URL(req.url, "http://localhost")`
+// throws a synchronous TypeError, which — pre-fix — is unhandled inside the
+// createServer callback and crashes the process (verified with a standalone
+// repro server: uncaught ERR_INVALID_URL, exit code 1).
+test("malformed absolute-form request-target does not crash the process; server keeps serving after", async () => {
+  const relay = stubRelay({ connected: true });
+  const parts = createBridgeHttpServer({ relay, startedAt: 0, fileToken: TOKEN, envToken: null });
+  const { port, close } = await listen(parts);
+  try {
+    const responseLine = await new Promise((resolve) => {
+      const sock = net.connect(port, "127.0.0.1", () => {
+        sock.write("GET http://[::1 HTTP/1.1\r\nHost: x\r\n\r\n");
+      });
+      // Resolve as soon as *some* response comes back (proof the server didn't
+      // crash) rather than waiting on socket close, which can ride out a
+      // keep-alive idle timeout.
+      sock.once("data", (chunk) => {
+        sock.destroy();
+        resolve(chunk.toString().split("\r\n")[0]);
+      });
+      sock.on("error", () => {});
+    });
+    assert.equal(responseLine, "HTTP/1.1 400 Bad Request");
+    // If the process survived the malformed request, it should still be able
+    // to serve a normal request.
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(res.status, 200);
   } finally {
     await close();
   }
