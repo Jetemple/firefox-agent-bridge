@@ -61,6 +61,14 @@ log "Installing bridge dependencies…"
 npm install --prefix "$BRIDGE_DIR" --silent
 ok "Dependencies ready."
 
+# 1b. put `ff` on PATH ---------------------------------------------------
+log "Linking the ff CLI onto your PATH…"
+if (cd "$BRIDGE_DIR" && npm link >/dev/null 2>&1); then
+  ok "ff CLI linked ($(command -v ff || echo 'open a new shell to pick it up'))"
+else
+  warn "npm link failed — you can still run it as: node $BRIDGE_DIR/cli.mjs"
+fi
+
 # 2. detect LAN IP ----------------------------------------------------------
 detect_ip() {
   local ip=""
@@ -139,6 +147,8 @@ ${c_blue}───────────────────────�
   ${c_green}2) Firefox${c_reset} → about:debugging#/runtime/this-firefox
      → "Load Temporary Add-on…" → choose:
         $EXT_MANIFEST
+
+  Try it:  ff status   ·   ff tabs   ·   ff nav example.com   ·   ff --help
 
  Restart Claude Desktop so it respawns the bridge with the new settings.
  IP changed / new network?  Re-run this script and re-upload the .plugin.
