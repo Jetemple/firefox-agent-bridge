@@ -24,13 +24,29 @@ export function getClaudeDesktopConfigPath({ platform = process.platform, env = 
 }
 
 // Pure read-merge: preserve every existing key, upsert only our server entry.
-export function upsertBridgeConfig(existing, bridgePath) {
+// serverEnv (optional) becomes the entry's `env` block — used to expose the SSE
+// endpoint on a LAN host with a token. Omitted entirely when empty so the
+// loopback-only default stays the simplest config.
+export function upsertBridgeConfig(existing, bridgePath, serverEnv) {
   const config = existing && typeof existing === "object" ? { ...existing } : {};
   const mcpServers =
     config.mcpServers && typeof config.mcpServers === "object" ? { ...config.mcpServers } : {};
-  mcpServers[MCP_SERVER_KEY] = { command: "node", args: [bridgePath] };
+  const entry = { command: "node", args: [bridgePath] };
+  if (serverEnv && Object.keys(serverEnv).length > 0) {
+    entry.env = serverEnv;
+  }
+  mcpServers[MCP_SERVER_KEY] = entry;
   config.mcpServers = mcpServers;
   return config;
+}
+
+// Pick the SSE exposure vars (host + token) out of an environment, so the bridge
+// Claude Desktop spawns inherits them. Only includes keys that are actually set.
+export function bridgeServerEnv(env = {}) {
+  const out = {};
+  if (env.FIREFOX_BRIDGE_SSE_HOST) out.FIREFOX_BRIDGE_SSE_HOST = env.FIREFOX_BRIDGE_SSE_HOST;
+  if (env.FIREFOX_BRIDGE_SSE_TOKEN) out.FIREFOX_BRIDGE_SSE_TOKEN = env.FIREFOX_BRIDGE_SSE_TOKEN;
+  return out;
 }
 
 export async function installFirefoxMcpBridge({
@@ -64,7 +80,7 @@ export async function installFirefoxMcpBridge({
     }
   }
 
-  const config = upsertBridgeConfig(existing, bridgePath);
+  const config = upsertBridgeConfig(existing, bridgePath, bridgeServerEnv(env));
 
   await mkdirFn(dirname(configPath), { recursive: true });
   await writeFileFn(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");

@@ -5,6 +5,17 @@ export const DEFAULT_PORT = 3002;
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_TIMEOUT_MS = 15000;
 
+// The relay binds loopback, but a browser still lets web pages open
+// ws://127.0.0.1:3002. A page always presents an http(s)/ws(s)/ftp Origin;
+// reject those so a malicious site can't hijack the relay (displace the real
+// extension and feed the model fabricated page data). The Firefox extension
+// connects from a moz-extension:// origin (or none), so it is unaffected.
+export function isAllowedWsOrigin(origin) {
+  if (!origin) return true;
+  if (/^(https?|wss?|ftp):\/\//i.test(origin)) return false;
+  return true;
+}
+
 // createRelay starts a WebSocket server bound to host:port and relays MCP tool
 // calls to the most-recently-connected Firefox extension client.
 //
@@ -18,11 +29,19 @@ export function createRelay({
   port = DEFAULT_PORT,
   host = DEFAULT_HOST,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  allowAnyOrigin = false,
   WebSocketServerCtor = WebSocketServer,
   uuid = randomUUID,
   log = () => {},
 } = {}) {
-  const wss = new WebSocketServerCtor({ host, port });
+  const verifyClient = allowAnyOrigin
+    ? undefined
+    : (info) => {
+        const ok = isAllowedWsOrigin(info.origin);
+        if (!ok) log(`rejected WS connection from web origin: ${info.origin}`);
+        return ok;
+      };
+  const wss = new WebSocketServerCtor({ host, port, verifyClient });
   const pending = new Map(); // id -> { resolve, reject, timer, socket }
   let activeClient = null;
 

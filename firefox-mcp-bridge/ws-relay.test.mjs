@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { WebSocket } from "ws";
-import { createRelay } from "./ws-relay.mjs";
+import { createRelay, isAllowedWsOrigin } from "./ws-relay.mjs";
 
 // --- helpers -------------------------------------------------------------
 
@@ -29,7 +29,49 @@ async function waitUntil(fn, { timeout = 1000, interval = 5 } = {}) {
   throw new Error("waitUntil timed out");
 }
 
+// Resolves true if the socket opens, false if the server refuses the upgrade.
+function tryConnect(port, { origin } = {}) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}`, origin ? { origin } : undefined);
+  return new Promise((resolve) => {
+    ws.on("open", () => {
+      ws.close();
+      resolve(true);
+    });
+    ws.on("error", () => resolve(false));
+  });
+}
+
 // --- tests ---------------------------------------------------------------
+
+test("isAllowedWsOrigin rejects web origins, allows the extension and origin-less clients", () => {
+  assert.equal(isAllowedWsOrigin(undefined), true);
+  assert.equal(isAllowedWsOrigin(""), true);
+  assert.equal(isAllowedWsOrigin("moz-extension://abc-123"), true);
+  assert.equal(isAllowedWsOrigin("chrome-extension://abc"), true);
+  assert.equal(isAllowedWsOrigin("https://evil.example"), false);
+  assert.equal(isAllowedWsOrigin("http://localhost:8080"), false);
+  assert.equal(isAllowedWsOrigin("wss://evil.example"), false);
+});
+
+test("the relay refuses a WebSocket connection from a web-page origin", async () => {
+  const { relay, port } = await startRelay();
+  try {
+    assert.equal(await tryConnect(port, { origin: "https://evil.example" }), false, "web origin must be refused");
+    assert.equal(await tryConnect(port, { origin: "moz-extension://abc" }), true, "extension origin must be allowed");
+    assert.equal(await tryConnect(port), true, "an origin-less (non-browser) client must be allowed");
+  } finally {
+    await relay.close();
+  }
+});
+
+test("allowAnyOrigin disables the origin guard (escape hatch)", async () => {
+  const { relay, port } = await startRelay({ allowAnyOrigin: true });
+  try {
+    assert.equal(await tryConnect(port, { origin: "https://evil.example" }), true);
+  } finally {
+    await relay.close();
+  }
+});
 
 test("dispatch with no connected client rejects NO_CLIENT", async () => {
   const { relay } = await startRelay();
