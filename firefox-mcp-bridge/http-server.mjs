@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { TOOLS } from "./tools.mjs";
+import { TOOLS, WS_TOOL_NAMES } from "./tools.mjs";
 import { isSseAuthorized } from "./sse-auth.mjs";
 import { isAllowedWsOrigin } from "./ws-relay.mjs";
 import { createBridge, SERVER_VERSION } from "./bridge.mjs";
@@ -14,9 +14,12 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 // Zod validators per dispatchable tool. ping_firefox is bridge-local (answered
 // by createBridge, never relayed), so it is deliberately absent — /dispatch
-// callers use /health + get_tabs_summary instead.
+// callers use /health + get_tabs_summary instead. Membership is derived from
+// WS_TOOL_NAMES (tools.mjs) so this allowlist and the CLI parity test share
+// one source of truth instead of duplicating the filter.
+const WS_TOOLS = new Set(WS_TOOL_NAMES);
 const DISPATCH_SCHEMAS = new Map(
-  TOOLS.filter((t) => t.name !== "ping_firefox").map((t) => [
+  TOOLS.filter((t) => WS_TOOLS.has(t.name)).map((t) => [
     t.name,
     t.inputSchema ? z.object(t.inputSchema) : z.object({}),
   ]),
@@ -121,6 +124,13 @@ export function createBridgeHttpServer({ relay, startedAt = Date.now(), fileToke
   }
 
   async function handleMcp(req, res) {
+    // Same DNS-rebinding/Origin defense as /dispatch: a browser page sends an
+    // http(s) Origin and is rejected before the token check ever runs; a
+    // curl/Node MCP client sends no Origin at all and passes through to the
+    // (still-enforced) token check below.
+    if (!isAllowedWsOrigin(req.headers?.origin)) {
+      return sendJson(res, 403, { error: { code: "FORBIDDEN", message: "web-page origins may not call /mcp" } });
+    }
     if (!isSseAuthorized(envToken, req)) {
       return sendJson(res, 401, { error: "unauthorized" });
     }

@@ -102,6 +102,45 @@ test("RemoteRelay clientCount reflects the last /health probe, synchronously", a
   }
 });
 
+test("RemoteRelay clientCount goes stale-safe (0) after a probe against a degraded owner (503, not a network failure)", async () => {
+  // A reachable-but-degraded owner: /health answers, just not with 2xx. This
+  // is NOT a connection loss (the TCP/HTTP round-trip succeeded), so
+  // onConnectionLost must not fire — but clientCount() must not keep
+  // reporting a stale "connected" reading from a prior healthy probe.
+  let healthy = true;
+  const server = createServer((req, res) => {
+    const path = new URL(req.url, "http://localhost").pathname;
+    if (path === "/health") {
+      if (healthy) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ name: "firefox-mcp-bridge", version: "0.1.0", pid: 42, startedAt: 0, extensionConnected: true }));
+      } else {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unavailable" }));
+      }
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  const owner = await new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve({ port: server.address().port }));
+  });
+  let lost = 0;
+  const relay = createRemoteRelay({ ssePort: owner.port, token: TOKEN, pollMs: 60_000, onConnectionLost: () => lost++ });
+  try {
+    await relay.probe();
+    assert.equal(relay.clientCount(), 1); // healthy first
+
+    healthy = false;
+    await relay.probe();
+    assert.equal(relay.clientCount(), 0);
+    assert.equal(lost, 0);
+  } finally {
+    await relay.close();
+    await new Promise((r) => server.close(r));
+  }
+});
+
 test("SwitchableRelay delegates and swap() redirects future calls", async () => {
   const a = { dispatch: async () => "from-a", clientCount: () => 1, close: async () => {} };
   const b = { dispatch: async () => "from-b", clientCount: () => 0, close: async () => {} };

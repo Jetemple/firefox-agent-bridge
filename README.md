@@ -141,7 +141,7 @@ it), rejects any web-page `Origin`, requires exact `application/json` (so a
 cross-origin page can't even send a no-preflight "simple" request that
 matters), only accepts loopback connections regardless of the bind host, and
 validates every tool name and argument against the same schemas as MCP before
-anything reaches Firefox. `/health` exposes only name/version/pid/connected.
+anything reaches Firefox. `/health` exposes only name/version/pid/startedAt/connected.
 
 ### Configuration
 

@@ -21,7 +21,14 @@ export function createRemoteRelay({
   async function probe() {
     try {
       const res = await fetchFn(`${base}/health`, { signal: AbortSignal.timeout(1500) });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        // The owner is reachable (TCP/HTTP answered) but degraded — not a
+        // connection loss, so onConnectionLost does not fire. Still, don't
+        // leave a stale "connected" reading: an owner that can't even serve
+        // /health cleanly shouldn't be reported as having a live extension.
+        extensionConnected = false;
+        return null;
+      }
       const health = await res.json();
       extensionConnected = !!health.extensionConnected;
       return health;

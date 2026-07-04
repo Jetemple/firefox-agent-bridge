@@ -285,7 +285,50 @@ test("/mcp still enforces the env token when configured", async () => {
   const { port, close } = await listen(parts);
   try {
     const noAuth = await mcpInitialize(port);
+    // The Origin guard runs first, but this request has no Origin header, so
+    // it must fall through to (and be rejected by) the token check — not the
+    // guard — confirming the ordering doesn't break existing token enforcement.
     assert.equal(noAuth.status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test("/mcp rejects a web-page Origin with 403 before the token check", async () => {
+  const relay = stubRelay();
+  const parts = createBridgeHttpServer({ relay, startedAt: 0, fileToken: TOKEN, envToken: "env-secret" });
+  const { port, close } = await listen(parts);
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        origin: "https://evil.example",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+      }),
+    });
+    assert.equal(res.status, 403);
+    const body = await res.json();
+    assert.equal(body.error.code, "FORBIDDEN");
+  } finally {
+    await close();
+  }
+});
+
+test("/mcp initialize with no Origin header still succeeds (curl/Node MCP clients)", async () => {
+  const relay = stubRelay();
+  const parts = createBridgeHttpServer({ relay, startedAt: 0, fileToken: TOKEN, envToken: null });
+  const { port, close } = await listen(parts);
+  try {
+    const res = await mcpInitialize(port);
+    assert.equal(res.status, 200);
+    assert.ok(res.headers.get("mcp-session-id"));
   } finally {
     await close();
   }
