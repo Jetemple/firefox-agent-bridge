@@ -15,6 +15,34 @@ const WS_URL = "ws://127.0.0.1:3002";
 const MIN_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 5000;
 
+// Identity for the multiplexing relay. runId is per background-script
+// lifetime (in memory only): a Firefox restart or extension reload issues a
+// new one, which the bridge uses to fail sessions safe instead of acting on
+// reissued tab ids.
+const runId = crypto.randomUUID();
+let profileName = null;
+let profileNameLoaded = null;
+
+function loadProfileName() {
+  profileNameLoaded ??= browser.storage.local
+    .get("profileName")
+    .then((r) => {
+      profileName = typeof r?.profileName === "string" ? r.profileName : null;
+    })
+    .catch(() => {});
+  return profileNameLoaded;
+}
+
+async function sendHello() {
+  await loadProfileName();
+  send({
+    type: "hello",
+    profileName,
+    runId,
+    version: browser.runtime.getManifest().version,
+  });
+}
+
 let socket = null;
 let backoffMs = MIN_BACKOFF_MS;
 let reconnectTimer = null;
@@ -86,6 +114,22 @@ async function resolveTab(tabId) {
 }
 FF.resolveTab = resolveTab;
 
+const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+// Management tool (bridge-only; not in the MCP tool list): names this profile
+// for the multiplexing relay. Hello is re-sent BEFORE the reply so the relay
+// has re-keyed by the time the caller sees success.
+FF.tools.set_profile_name = async (args) => {
+  const name = String(args?.name ?? "");
+  if (name === "default" || !PROFILE_NAME_RE.test(name)) {
+    throw bridgeError("BAD_NAME", `profile name must match ${PROFILE_NAME_RE} ("default" is reserved)`);
+  }
+  await browser.storage.local.set({ profileName: name });
+  profileName = name;
+  await sendHello();
+  return { ok: true, name };
+};
+
 // Tools that need no tab resolution.
 const NO_TAB = new Set([
   "get_tabs_summary",
@@ -95,6 +139,8 @@ const NO_TAB = new Set([
   "reload",
   "back",
   "forward",
+  "set_profile_name",
+  "open_tab",
 ]);
 // Tools that need the resolved tab (for windowId/activation) but are allowed on
 // restricted URLs (captureVisibleTab does not inject script).
@@ -183,8 +229,9 @@ function connect() {
 
   socket = ws;
 
-  ws.addEventListener("open", () => {
+  ws.addEventListener("open", async () => {
     backoffMs = MIN_BACKOFF_MS;
+    await sendHello(); // must be the first frame: the relay keys this connection off it
     setStatus({ state: "connected", message: `Connected to ${WS_URL}` });
   });
 

@@ -50,6 +50,7 @@ test("background scripts fully load: every WS tool handler + onMessage listener 
     setTimeout: () => 0,
     clearTimeout: () => {},
     console,
+    crypto: { randomUUID: () => "test-run-id" },
     browser: {
       runtime: {
         onStartup: { addListener() {} },
@@ -60,9 +61,10 @@ test("background scripts fully load: every WS tool handler + onMessage listener 
           },
         },
         sendMessage: () => Promise.resolve(),
+        getManifest: () => ({ version: "0.0-test" }),
       },
       alarms: { create() {}, onAlarm: { addListener() {} } },
-      storage: { local: { set: () => Promise.resolve() } },
+      storage: { local: { set: () => Promise.resolve(), get: () => Promise.resolve({}) } },
       tabs: {},
       windows: {},
       scripting: {},
@@ -75,10 +77,12 @@ test("background scripts fully load: every WS tool handler + onMessage listener 
 
   assert.doesNotThrow(() => vm.runInContext(concatenatedSource(), sandbox), "background load must not throw");
 
-  // The extension must implement exactly the tools the bridge dispatches.
+  // The extension must implement exactly the tools the bridge dispatches over
+  // MCP, plus set_profile_name — a bridge-only management tool (see Task 2)
+  // that the relay calls directly and that is never listed for MCP clients.
   assert.deepEqual(
     Object.keys(sandbox.FFBridge.tools).sort(),
-    [...WS_TOOL_NAMES].sort(),
+    [...WS_TOOL_NAMES, "set_profile_name"].sort(),
   );
   assert.equal(typeof sandbox.__onMessage, "function", "onMessage listener must register");
 });
@@ -98,6 +102,7 @@ test("the popup status request gets a response (no 'receiving end does not exist
     setTimeout: () => 0,
     clearTimeout: () => {},
     console,
+    crypto: { randomUUID: () => "test-run-id" },
     browser: {
       runtime: {
         onStartup: { addListener() {} },
@@ -108,9 +113,10 @@ test("the popup status request gets a response (no 'receiving end does not exist
           },
         },
         sendMessage: () => Promise.resolve(),
+        getManifest: () => ({ version: "0.0-test" }),
       },
       alarms: { create() {}, onAlarm: { addListener() {} } },
-      storage: { local: { set: () => Promise.resolve() } },
+      storage: { local: { set: () => Promise.resolve(), get: () => Promise.resolve({}) } },
       tabs: {},
       windows: {},
       scripting: {},
