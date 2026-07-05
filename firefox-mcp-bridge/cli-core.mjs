@@ -63,12 +63,6 @@ const BUILDERS = {
     if (!pos[0]) throw new UsageError("usage: ff nav <url> [--tab N]");
     return [{ tool: "navigate", args: withTab({ url: pos[0] }, flags) }];
   },
-  open: (pos, flags) => {
-    if (!pos[0]) throw new UsageError("usage: ff open <url> [--active]");
-    const args = { url: pos[0] };
-    if (flags.active) args.active = true;
-    return [{ tool: "open_tab", args }];
-  },
   text: (pos, flags) => {
     const args = withTab({}, flags);
     if (flags.max != null) args.maxLength = num(flags.max, "--max");

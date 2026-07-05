@@ -7,12 +7,13 @@ const EXPECTED = [
   "ping_firefox",
   "get_tabs_summary",
   "navigate",
-  "open_tab",
   "screenshot",
   "get_page_text",
   "click",
   "type",
   "javascript_tool",
+  // open_tab (Task 3)
+  "open_tab",
   // group A — tab tools
   "close_tab",
   "activate_tab",
