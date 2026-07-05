@@ -7,7 +7,6 @@ import { createRemoteRelay, createSwitchableRelay } from "./remote-relay.mjs";
 import { sseInsecureWarning } from "./sse-auth.mjs";
 import { loadOrCreateToken, DEFAULT_TOKEN_PATH } from "../scripts/secure-config.mjs";
 import { execSync } from "node:child_process";
-import { setTimeout as delay } from "node:timers/promises";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 // stdout is reserved exclusively for the MCP StdioServerTransport. Any stray
@@ -51,13 +50,16 @@ export function isBridgeCommand(command) {
   return /firefox-mcp-bridge[/\\]index\.mjs/.test(command ?? "");
 }
 
-export function killStaleBridge(port, { execFn = execSync, log = () => {} } = {}) {
+export function killStaleBridge(
+  port,
+  { execFn = execSync, killFn = (pid, sig) => process.kill(pid, sig), log = () => {} } = {},
+) {
   const killed = [];
   const foreign = [];
   for (const { pid, command } of inspectPortHolders(port, { execFn })) {
     if (isBridgeCommand(command)) {
       try {
-        process.kill(pid, "SIGTERM");
+        killFn(pid, "SIGTERM");
         killed.push(pid);
         log(`killed stale bridge PID ${pid}`);
       } catch {
@@ -212,21 +214,20 @@ async function main() {
       await inner.probe(); // seed extensionConnected so clientCount() is honest immediately
       logErr(`following existing bridge (pid ${health.pid})`);
     } else {
-      const { foreign } = killStaleBridge(config.port, { log: logErr });
-      if (foreign.length) {
-        logErr(
-          `port ${config.port} is held by non-bridge process(es) ${foreign.join(", ")} — ` +
-            `refusing to kill; free the port or set FIREFOX_BRIDGE_WS_PORT`,
-        );
-        process.exit(1);
-      }
-      await delay(800);
-      try {
-        inner = await becomeOwner();
-      } catch (err2) {
-        logErr(`fatal: ${err2?.message ?? err2}`);
-        process.exit(1);
-      }
+      // Never kill on startup: the holder may be an older live bridge, a
+      // bridge whose HTTP side failed, or a foreign process. Only an explicit
+      // `ff start --replace` may SIGTERM a positively identified bridge PID.
+      const holders = inspectPortHolders(config.port);
+      const held = holders.length
+        ? holders.map(({ pid, command }) => `pid ${pid} (${command || "unknown"})`).join(", ")
+        : "an unknown process";
+      logErr(
+        `port ${config.port} is in use by ${held} but no bridge answered on ` +
+          `http://127.0.0.1:${config.ssePort}/health — refusing to kill it. ` +
+          "Run `ff start --replace` to replace a stale bridge, free the port, " +
+          "or set FIREFOX_BRIDGE_WS_PORT",
+      );
+      process.exit(1);
     }
   }
 

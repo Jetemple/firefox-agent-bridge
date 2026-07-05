@@ -118,6 +118,15 @@ test("lifecycle and help parse", () => {
   assert.equal(parseCli([]).kind, "help");
 });
 
+test("--replace parses as a boolean flag on start", () => {
+  const p = parseCli(["start", "--replace"]);
+  assert.equal(p.ok, true);
+  assert.equal(p.kind, "lifecycle");
+  assert.equal(p.command, "start");
+  assert.equal(p.flags.replace, true);
+  assert.equal(parseCli(["start"]).flags.replace, false);
+});
+
 test("global flags: --json and --timeout are extracted", () => {
   const p = steps(["tabs", "--json", "--timeout", "5000"]);
   assert.equal(p.flags.json, true);
@@ -149,6 +158,27 @@ test("formatResult renders tabs, text, find, and links as plain text", () => {
 test("formatResult --json emits the last step result as JSON", () => {
   const out = formatResult("tabs", [{ tool: "get_tabs_summary", result: { tabs: [] } }], { json: true });
   assert.deepEqual(JSON.parse(out), { tabs: [] });
+});
+
+test("formatResult unwraps js results: string raw, non-string as JSON, wrapper only with --json", () => {
+  const jsRes = (v) => [{ tool: "javascript_tool", result: { result: v } }];
+  // strings print raw — no {"result":...} wrapper to strip
+  assert.equal(formatResult("js", jsRes("hello world"), { json: false }), "hello world");
+  // primitives stringify to their bare form
+  assert.equal(formatResult("js", jsRes(42), { json: false }), "42");
+  assert.equal(formatResult("js", jsRes(null), { json: false }), "null");
+  // objects/arrays pretty-print as JSON
+  assert.equal(formatResult("js", jsRes({ a: 1 }), { json: false }), JSON.stringify({ a: 1 }, null, 2));
+  // --json still emits the full wrapper
+  assert.deepEqual(JSON.parse(formatResult("js", jsRes("x"), { json: true })), { result: "x" });
+});
+
+test("--wait-for and --wait-timeout parse into global flags", () => {
+  const p = steps(["nav", "x.com", "--wait-for", ".card", "--wait-timeout", "3000"]);
+  assert.equal(p.flags.waitFor, ".card");
+  assert.equal(p.flags.waitTimeout, 3000);
+  // navigate step itself is unchanged by the wait flags
+  assert.deepEqual(p.steps, [{ tool: "navigate", args: { url: "x.com" } }]);
 });
 
 // --- coverage: every relayed tool is reachable from the CLI ---

@@ -2,7 +2,7 @@
 // ff — drive the logged-in Firefox from the shell. Thin HTTP client over the
 // bridge's /health + /dispatch; see cli-core.mjs for the command table.
 import { spawn } from "node:child_process";
-import { mkdirSync, openSync, writeFileSync, realpathSync } from "node:fs";
+import { mkdirSync, openSync, writeFileSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,6 +69,70 @@ async function ensureBridge(settings, { fetchFn, spawnFn, stderr, noAutostart, p
   throw new CliError(`bridge failed to start — see ${join(dir, "bridge.log")}`);
 }
 
+function readStdinAll() {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (c) => (data += c));
+    process.stdin.on("end", () => resolve(data));
+    process.stdin.on("error", reject);
+  });
+}
+
+// `ff js` accepts code inline, from a file (`-f <path>`), or from stdin (`-`),
+// so non-trivial scripts skip shell-escaping entirely. File/stdin reads are I/O
+// and live here; cli-core stays pure. Returns a rewritten argv with the code as
+// the sole js positional. Throws CliError(2) on an unreadable file.
+async function resolveJsSource(argv, deps) {
+  if (argv[0] !== "js") return argv;
+  let code = null;
+  const rest = [];
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "-f" || a === "--file") {
+      const path = argv[++i];
+      if (path == null) throw new CliError("usage: ff js -f <file>", 2);
+      try {
+        code = deps.readFileFn(path, "utf8");
+      } catch (err) {
+        throw new CliError(`cannot read ${path}: ${err?.message ?? err}`, 2);
+      }
+    } else if (a === "-") {
+      code = await deps.readStdin();
+    } else {
+      rest.push(a);
+    }
+  }
+  return code == null ? argv : ["js", code, ...rest];
+}
+
+// Client-side `--wait-for <css>`: poll find_element until the selector appears
+// (or the deadline passes), so callers stop guessing fixed `sleep`s after nav.
+async function waitForSelector(settings, token, deps, flags, lastResult) {
+  const timeoutMs = Number.isFinite(flags.waitTimeout) ? flags.waitTimeout : 10000;
+  const args = { selector: flags.waitFor };
+  if (lastResult?.tabId != null) args.tabId = lastResult.tabId;
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  for (;;) {
+    try {
+      const r = await dispatch(settings, token, deps.fetchFn, "find_element", args, flags.timeout);
+      if (r?.found) return;
+      lastError = null;
+    } catch (err) {
+      // A tab created mid-navigation is briefly about:blank (RESTRICTED_URL) and
+      // a loading page can transiently fail the probe — that's exactly what we
+      // are waiting out, so swallow it and retry until the deadline.
+      lastError = err;
+    }
+    if (Date.now() >= deadline) {
+      const detail = lastError ? ` (last error: ${lastError.message})` : "";
+      throw new CliError(`--wait-for: "${flags.waitFor}" did not appear within ${Math.round(timeoutMs / 1000)}s${detail}`);
+    }
+    await new Promise((res) => setTimeout(res, deps.waitPollMs));
+  }
+}
+
 async function dispatch(settings, token, fetchFn, tool, args, timeout) {
   let res;
   try {
@@ -86,6 +150,56 @@ async function dispatch(settings, token, fetchFn, tool, args, timeout) {
   return body.result;
 }
 
+// `ff start --replace`: the only path allowed to SIGTERM an existing bridge.
+// Kills the pid advertised by /health, then any lingering positively
+// identified bridge processes still holding the WS/HTTP ports; refuses to
+// touch foreign holders. index.mjs / ws-relay.mjs are imported lazily so the
+// per-call CLI path stays free of their startup cost.
+async function replaceExistingBridge(settings, deps) {
+  const { fetchFn, stderr, killFn, pollMs } = deps;
+  const [{ killStaleBridge, inspectPortHolders }, { DEFAULT_PORT }] = await Promise.all([
+    import("./index.mjs"),
+    import("./ws-relay.mjs"),
+  ]);
+  const wsPort = deps.env.FIREFOX_BRIDGE_WS_PORT ? Number(deps.env.FIREFOX_BRIDGE_WS_PORT) : DEFAULT_PORT;
+  const execOpts = deps.execFn ? { execFn: deps.execFn } : {};
+
+  const health = await getHealth(settings, fetchFn);
+  if (health) {
+    stderr(`replacing running bridge (pid ${health.pid})\n`);
+    try {
+      killFn(health.pid, "SIGTERM");
+    } catch (err) {
+      if (err?.code !== "ESRCH") {
+        throw new CliError(`could not signal bridge (pid ${health.pid}): ${err?.message ?? err}`);
+      }
+    }
+    const deadline = Date.now() + 3000;
+    while (await getHealth(settings, fetchFn)) {
+      if (Date.now() > deadline) throw new CliError(`bridge (pid ${health.pid}) did not stop within 3s`);
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+  }
+
+  // A half-dead bridge can hold its ports while staying invisible to /health.
+  for (const port of [wsPort, settings.ssePort]) {
+    const { foreign } = killStaleBridge(port, { ...execOpts, killFn, log: (m) => stderr(`${m}\n`) });
+    if (foreign.length) {
+      throw new CliError(
+        `port ${port} is held by non-bridge process(es) ${foreign.join(", ")} — refusing to kill; free the port first`,
+      );
+    }
+  }
+  const deadline = Date.now() + 3000;
+  while (
+    inspectPortHolders(wsPort, execOpts).length ||
+    inspectPortHolders(settings.ssePort, execOpts).length
+  ) {
+    if (Date.now() > deadline) throw new CliError("previous bridge did not release its ports within 3s");
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}
+
 async function runLifecycle(command, settings, deps) {
   const { fetchFn, stdout, stderr } = deps;
   if (command === "status") {
@@ -101,6 +215,7 @@ async function runLifecycle(command, settings, deps) {
     return 0;
   }
   if (command === "start") {
+    if (deps.replace) await replaceExistingBridge(settings, deps);
     const health = await ensureBridge(settings, deps);
     deps.stdout(`bridge running (pid ${health.pid})\n`);
     return 0;
@@ -153,11 +268,23 @@ export async function runCli(argv, overrides = {}) {
     stderr: overrides.stderr ?? ((s) => process.stderr.write(s)),
     pollMs: overrides.autostartPollMs ?? 100,
     timeoutMs: overrides.autostartTimeoutMs ?? 4000,
+    killFn: overrides.killFn ?? ((pid, sig) => process.kill(pid, sig)),
+    execFn: overrides.execFn,
+    readFileFn: overrides.readFileFn ?? readFileSync,
+    readStdin: overrides.readStdin ?? readStdinAll,
+    waitPollMs: overrides.waitPollMs ?? 250,
     env,
   };
   const settings = readSettings(env);
 
-  const parsed = parseCli(argv);
+  let effectiveArgv = argv;
+  try {
+    effectiveArgv = await resolveJsSource(argv, deps);
+  } catch (err) {
+    deps.stderr(`${err.message}\n`);
+    return err instanceof CliError ? err.exitCode : 1;
+  }
+  const parsed = parseCli(effectiveArgv);
   if (!parsed.ok) {
     deps.stderr(`${parsed.error}\n`);
     return 2;
@@ -167,6 +294,7 @@ export async function runCli(argv, overrides = {}) {
     return 0;
   }
   deps.noAutostart = parsed.flags.noAutostart;
+  deps.replace = parsed.flags.replace;
 
   try {
     const token = env.FIREFOX_BRIDGE_SSE_TOKEN || loadOrCreateToken({ tokenPath: settings.tokenFile });
@@ -186,12 +314,18 @@ export async function runCli(argv, overrides = {}) {
       results.push({ tool: step.tool, result: prev });
     }
 
+    if (parsed.flags.waitFor) {
+      await waitForSelector(settings, token, deps, parsed.flags, prev);
+    }
+
     if (parsed.command === "screenshot") {
       const shot = results[results.length - 1].result;
       if (typeof shot?.dataUrl !== "string") throw new CliError("screenshot payload missing dataUrl");
       const out = parsed.flags.out ?? `firefox-${Date.now()}.${shot.format === "jpeg" ? "jpg" : "png"}`;
       writeFileSync(out, Buffer.from(stripDataUrlPrefix(shot.dataUrl), "base64"));
-      deps.stdout(`${resolve(out)} (${shot.width}x${shot.height})\n`);
+      // Dimensions are best-effort (the probe can't inject into about:* pages).
+      const dims = shot.width != null && shot.height != null ? ` (${shot.width}x${shot.height})` : "";
+      deps.stdout(`${resolve(out)}${dims}\n`);
       return 0;
     }
 

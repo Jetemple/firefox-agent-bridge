@@ -15,7 +15,12 @@ function tmpDir() {
 // Stub owner with scripted /dispatch results per tool.
 function stubOwner({ results = {}, extensionConnected = true, healthPid = process.pid } = {}) {
   const requests = [];
+  let down = false;
   const server = createServer(async (req, res) => {
+    if (down) {
+      req.socket.destroy(); // simulate a dead bridge without freeing the port
+      return;
+    }
     const path = new URL(req.url, "http://localhost").pathname;
     res.setHeader("content-type", "application/json");
     if (path === "/health") {
@@ -27,7 +32,13 @@ function stubOwner({ results = {}, extensionConnected = true, healthPid = proces
       for await (const c of req) raw += c;
       const body = JSON.parse(raw);
       requests.push({ auth: req.headers.authorization, body });
-      const out = results[body.tool] ?? { result: { ok: true } };
+      let out = results[body.tool] ?? { result: { ok: true } };
+      // Scripted result may be a function of the per-tool call count, so a test
+      // can return "not found" for the first N polls and "found" afterwards.
+      if (typeof out === "function") {
+        const nth = requests.filter((r) => r.body.tool === body.tool).length - 1;
+        out = out(nth, body);
+      }
       res.end(JSON.stringify(out));
       return;
     }
@@ -36,7 +47,12 @@ function stubOwner({ results = {}, extensionConnected = true, healthPid = proces
   });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () =>
-      resolve({ port: server.address().port, requests, close: () => new Promise((r) => server.close(r)) }),
+      resolve({
+        port: server.address().port,
+        requests,
+        setDown: (v) => (down = v),
+        close: () => new Promise((r) => server.close(r)),
+      }),
     );
   });
 }
@@ -136,6 +152,119 @@ test("usage errors exit 2 with the message", async () => {
   }
 });
 
+test("ff js prints a string result raw (no {\"result\":...} wrapper)", async () => {
+  const owner = await stubOwner({ results: { javascript_tool: { result: { result: "42 rooms" } } } });
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["js", "'x'"], c.opts);
+    assert.equal(code, 0);
+    assert.equal(c.out.join("").trim(), "42 rooms");
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff js -f <file> loads code from a file instead of argv", async () => {
+  const owner = await stubOwner({ results: { javascript_tool: { result: { result: "ok" } } } });
+  const c = ctx(owner);
+  const script = join(c.dir, "extract.js");
+  writeFileSync(script, 'document.querySelectorAll("a").length + "\\n"');
+  try {
+    const code = await runCli(["js", "-f", script, "--tab", "21"], c.opts);
+    assert.equal(code, 0);
+    const call = owner.requests.find((r) => r.body.tool === "javascript_tool");
+    assert.equal(call.body.args.code, 'document.querySelectorAll("a").length + "\\n"');
+    assert.equal(call.body.args.tabId, 21);
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff js - reads code from stdin", async () => {
+  const owner = await stubOwner({ results: { javascript_tool: { result: { result: "ok" } } } });
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["js", "-"], { ...c.opts, readStdin: async () => "1 + 1" });
+    assert.equal(code, 0);
+    const call = owner.requests.find((r) => r.body.tool === "javascript_tool");
+    assert.equal(call.body.args.code, "1 + 1");
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff js -f on a missing file exits 2 without dispatching", async () => {
+  const owner = await stubOwner({});
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["js", "-f", join(c.dir, "nope.js")], c.opts);
+    assert.equal(code, 2);
+    assert.equal(owner.requests.length, 0);
+    assert.match(c.err.join(""), /nope\.js/);
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff nav --wait-for polls find_element until the selector appears", async () => {
+  const owner = await stubOwner({
+    results: {
+      navigate: { result: { tabId: 21, url: "https://x" } },
+      // not found on the first two polls, then found on the third
+      find_element: (nth) => ({ result: nth < 2 ? { found: false } : { found: true, element: "div.card", x: 1, y: 2 } }),
+    },
+  });
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["nav", "https://x", "--wait-for", "div.card"], { ...c.opts, waitPollMs: 1 });
+    assert.equal(code, 0);
+    const finds = owner.requests.filter((r) => r.body.tool === "find_element");
+    assert.equal(finds.length, 3);
+    // polls the tab that navigate returned, with the given selector
+    assert.equal(finds[0].body.args.tabId, 21);
+    assert.equal(finds[0].body.args.selector, "div.card");
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff nav --wait-for keeps polling through transient errors while the new tab is still about:blank", async () => {
+  const owner = await stubOwner({
+    results: {
+      navigate: { result: { tabId: 21, url: "https://x" } },
+      // a freshly-created tab is about:blank until the load starts → RESTRICTED_URL;
+      // the poll must absorb that and keep going, not abort.
+      find_element: (nth) =>
+        nth < 2 ? { error: { code: "RESTRICTED_URL", message: "Tab URL is restricted: about:blank" } } : { result: { found: true } },
+    },
+  });
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["nav", "https://x", "--wait-for", "h1"], { ...c.opts, waitPollMs: 1 });
+    assert.equal(code, 0);
+    assert.equal(owner.requests.filter((r) => r.body.tool === "find_element").length, 3);
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff nav --wait-for times out with exit 1 when the selector never appears", async () => {
+  const owner = await stubOwner({
+    results: {
+      navigate: { result: { tabId: 21, url: "https://x" } },
+      find_element: { result: { found: false } },
+    },
+  });
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["nav", "https://x", "--wait-for", ".card", "--wait-timeout", "20"], { ...c.opts, waitPollMs: 1 });
+    assert.equal(code, 1);
+    assert.match(c.err.join(""), /wait-for.*\.card/);
+  } finally {
+    await owner.close();
+  }
+});
+
 test("ff screenshot writes the decoded image to disk", async () => {
   const png = Buffer.from("fakepng");
   const owner = await stubOwner({
@@ -150,6 +279,27 @@ test("ff screenshot writes the decoded image to disk", async () => {
     assert.equal(code, 0);
     assert.deepEqual(readFileSync(out), png);
     assert.match(c.out.join(""), new RegExp(out.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff screenshot omits dimensions when the extension could not measure them", async () => {
+  // Restricted pages (about:*) allow capture but not the viewport-size probe,
+  // so width/height come back null — the CLI must not print "(nullxnull)".
+  const png = Buffer.from("fakepng");
+  const owner = await stubOwner({
+    results: {
+      screenshot: { result: { dataUrl: `data:image/png;base64,${png.toString("base64")}`, format: "png", width: null, height: null } },
+    },
+  });
+  const c = ctx(owner);
+  const out = join(c.dir, "shot.png");
+  try {
+    const code = await runCli(["screenshot", "-o", out], c.opts);
+    assert.equal(code, 0);
+    assert.deepEqual(readFileSync(out), png);
+    assert.doesNotMatch(c.out.join(""), /null/);
   } finally {
     await owner.close();
   }
@@ -198,6 +348,97 @@ test("--no-autostart fails fast instead of spawning", async () => {
   const code = await runCli(["tabs", "--no-autostart"], c.opts);
   assert.equal(code, 1);
   assert.match(c.err.join(""), /not running/i);
+});
+
+test("ff start --replace SIGTERMs the advertised pid, waits for death, then starts fresh", async () => {
+  const owner = await stubOwner({ healthPid: 4242 });
+  const c = ctx(owner);
+  const killed = [];
+  let spawned = false;
+  c.opts.killFn = (pid, sig) => {
+    killed.push({ pid, sig });
+    owner.setDown(true); // the killed bridge stops answering /health
+  };
+  c.opts.execFn = () => {
+    throw new Error("lsof: no holders"); // ports free once the pid dies
+  };
+  c.opts.spawnFn = () => {
+    spawned = true;
+    owner.setDown(false); // fresh bridge comes up healthy
+    return { unref: () => {}, pid: 555 };
+  };
+  c.opts.autostartPollMs = 10;
+  c.opts.autostartTimeoutMs = 2000;
+  try {
+    const code = await runCli(["start", "--replace"], c.opts);
+    assert.equal(code, 0, c.err.join(""));
+    assert.deepEqual(killed, [{ pid: 4242, sig: "SIGTERM" }]);
+    assert.ok(spawned, "should spawn a fresh bridge after killing the old one");
+    assert.match(c.out.join(""), /bridge running/);
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff start --replace kills a positively identified stale bridge holding the WS port", async () => {
+  const owner = await stubOwner();
+  owner.setDown(true); // /health never answers — the stale-holder scenario
+  const c = ctx(owner);
+  c.opts.env.FIREFOX_BRIDGE_WS_PORT = "3999";
+  const killed = [];
+  let staleAlive = true;
+  let spawned = false;
+  c.opts.execFn = (cmd) => {
+    if (cmd.startsWith("lsof") && cmd.includes("3999")) {
+      if (staleAlive) return "777\n";
+      throw new Error("no holders");
+    }
+    if (cmd.startsWith("lsof")) throw new Error("no holders"); // SSE port is free
+    if (cmd.includes("-p 777")) return "node /repo/firefox-mcp-bridge/index.mjs\n";
+    throw new Error(`unexpected exec: ${cmd}`);
+  };
+  c.opts.killFn = (pid, sig) => {
+    killed.push({ pid, sig });
+    staleAlive = false;
+  };
+  c.opts.spawnFn = () => {
+    spawned = true;
+    owner.setDown(false);
+    return { unref: () => {}, pid: 555 };
+  };
+  c.opts.autostartPollMs = 10;
+  c.opts.autostartTimeoutMs = 2000;
+  try {
+    const code = await runCli(["start", "--replace"], c.opts);
+    assert.equal(code, 0, c.err.join(""));
+    assert.deepEqual(killed, [{ pid: 777, sig: "SIGTERM" }]);
+    assert.ok(spawned);
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff start --replace refuses to kill a foreign process holding the WS port", async () => {
+  const owner = await stubOwner();
+  owner.setDown(true);
+  const c = ctx(owner);
+  c.opts.env.FIREFOX_BRIDGE_WS_PORT = "3999";
+  const killed = [];
+  c.opts.execFn = (cmd) => {
+    if (cmd.startsWith("lsof") && cmd.includes("3999")) return "888\n";
+    if (cmd.startsWith("lsof")) throw new Error("no holders");
+    if (cmd.includes("-p 888")) return "postgres -D /data\n";
+    throw new Error(`unexpected exec: ${cmd}`);
+  };
+  c.opts.killFn = (pid, sig) => killed.push({ pid, sig });
+  try {
+    const code = await runCli(["start", "--replace"], c.opts);
+    assert.equal(code, 1);
+    assert.match(c.err.join(""), /refusing to kill/i);
+    assert.deepEqual(killed, [], "must not signal a foreign pid");
+  } finally {
+    await owner.close();
+  }
 });
 
 import { spawn as realSpawn } from "node:child_process";

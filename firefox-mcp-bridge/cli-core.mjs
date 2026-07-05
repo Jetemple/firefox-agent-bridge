@@ -3,7 +3,7 @@
 // (click/type by query) become find_element + coordinate steps — the bridge
 // stays strictly schema-shaped; agent-friendliness lives client-side.
 
-const GLOBAL_BOOL = new Set(["json", "no-autostart"]);
+const GLOBAL_BOOL = new Set(["json", "no-autostart", "replace"]);
 const BOOL_FLAGS = new Set([
   ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "ctrl", "alt", "shift", "meta",
 ]);
@@ -199,10 +199,16 @@ export function parseCli(argv) {
     json: !!flags.json,
     out: flags.out,
     noAutostart: !!flags["no-autostart"],
+    replace: !!flags.replace,
     timeout: flags.timeout != null ? Number(flags.timeout) : undefined,
+    waitFor: flags["wait-for"],
+    waitTimeout: flags["wait-timeout"] != null ? Number(flags["wait-timeout"]) : undefined,
   };
   if (global.timeout != null && !Number.isFinite(global.timeout)) {
     return { ok: false, error: "--timeout must be a number of milliseconds" };
+  }
+  if (global.waitTimeout != null && !Number.isFinite(global.waitTimeout)) {
+    return { ok: false, error: "--wait-timeout must be a number of milliseconds" };
   }
   if (LIFECYCLE.has(command)) return { ok: true, kind: "lifecycle", command, flags: global };
   const builder = BUILDERS[command];
@@ -225,6 +231,12 @@ export function formatResult(command, results, { json = false } = {}) {
     }
     case "text":
       return typeof last?.text === "string" ? last.text : JSON.stringify(last, null, 2);
+    case "js": {
+      // Unwrap the { result } envelope: strings print raw (no wrapper to strip
+      // in shell pipelines), everything else pretty-prints as JSON.
+      const value = last?.result;
+      return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    }
     case "find":
       return last?.found
         ? `found ${last.element} "${last.text}" at (${last.x}, ${last.y})${last.count > 1 ? ` (+${last.count - 1} more matches)` : ""}`
@@ -241,12 +253,12 @@ export function formatResult(command, results, { json = false } = {}) {
 export function usageText() {
   return `ff — drive your real, logged-in Firefox from the shell
 
-Bridge:  ff status | start | stop | ping
+Bridge:  ff status | start [--replace] | stop | ping
 Tabs:    ff tabs                        ff tab close|activate [--tab N]
          ff nav <url> [--tab N]         ff reload [--hard] | back | forward
 Read:    ff text [--max N]              ff screenshot [-o out.png] [--jpeg [--quality N]]
          ff links [--max N]             ff tables [--max N]
-         ff find <text> [--css SEL]     ff js <code>
+         ff find <text> [--css SEL]     ff js <code> | -f <file> | -   (stdin)
 Act:     ff click <query> [--css SEL] | --at X,Y     (also: hover, dblclick, rclick)
          ff type <query> <text> [--clear] | ff type <text> --focused
          ff key <key> [--ctrl --alt --shift --meta]
@@ -256,5 +268,7 @@ Act:     ff click <query> [--css SEL] | --at X,Y     (also: hover, dblclick, rcl
 
 <query> matches visible text/aria-label (find_element); add --css to scope.
 Global:  --tab N   --json   --timeout MS   --no-autostart
+         --wait-for <css> [--wait-timeout MS]   poll until an element appears
+js prints string results raw; add --json for the full value as JSON.
 The bridge auto-starts on demand; logs: ~/.firefox-mcp/bridge.log`;
 }

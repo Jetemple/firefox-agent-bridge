@@ -121,6 +121,40 @@ test("second instance follows a healthy owner instead of killing it, then promot
   await new Promise((r) => follower.child.once("exit", r));
 });
 
+test("startup never kills a WS-port holder that does not answer /health — exits with actionable error", async () => {
+  const wsPort = await freePort();
+  const sseA = await freePort();
+  const sseB = await freePort();
+  const tokenFile = tmpToken();
+
+  // Owner is a genuine bridge (its command line matches isBridgeCommand), but
+  // it answers /health on sseA — invisible to an instance probing sseB.
+  const owner = spawnBridge({ wsPort, ssePort: sseA, tokenFile });
+  await waitFor(async () => (await probeBridgeHealth({ ssePort: sseA })) !== null);
+
+  const second = spawnBridge({ wsPort, ssePort: sseB, tokenFile });
+  try {
+    const code = await Promise.race([
+      new Promise((r) => second.child.once("exit", r)),
+      new Promise((r) => setTimeout(() => r("did not exit"), 8000)),
+    ]);
+    assert.equal(code, 1, `second instance should exit 1 (got: ${code}); stderr: ${second.stderr()}`);
+    assert.match(second.stderr(), /ff start --replace/);
+    assert.match(second.stderr(), new RegExp(`port ${wsPort}`));
+
+    // The owner must be untouched.
+    assert.equal((await probeBridgeHealth({ ssePort: sseA })).pid, owner.child.pid);
+  } finally {
+    second.child.kill("SIGKILL");
+    owner.child.kill("SIGTERM");
+    // The owner may already be dead (that IS the bug this test guards against),
+    // in which case 'exit' has already fired — don't wait on it forever.
+    if (owner.child.exitCode === null && owner.child.signalCode === null) {
+      await new Promise((r) => owner.child.once("exit", r));
+    }
+  }
+});
+
 test("standalone instance exits 0 when a healthy bridge already runs", async () => {
   const wsPort = await freePort();
   const ssePort = await freePort();
