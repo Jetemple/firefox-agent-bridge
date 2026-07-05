@@ -75,7 +75,9 @@ async function resolveTab(tabId) {
     try {
       return await browser.tabs.get(tabId);
     } catch {
-      // Tab stale / closed — fall back to active tab.
+      // An explicitly supplied id must never silently become the active tab —
+      // a stale id + close_tab would destroy whatever the user is looking at.
+      throw bridgeError("TAB_NOT_FOUND", `Tab ${tabId} not found — call get_tabs_summary for fresh ids`);
     }
   }
   const [active] = await browser.tabs.query({ active: true, currentWindow: true });
