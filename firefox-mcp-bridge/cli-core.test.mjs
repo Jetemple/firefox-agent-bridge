@@ -186,7 +186,7 @@ test("--wait-for and --wait-timeout parse into global flags", () => {
 test("every WS tool is reachable through some CLI command", () => {
   const reachable = new Set();
   const invocations = [
-    ["tabs"], ["nav", "x.com"], ["text"], ["screenshot"],
+    ["tabs"], ["nav", "x.com"], ["open", "x.com"], ["text"], ["screenshot"],
     ["click", "--at", "1,2"], ["type", "t", "--focused"], ["js", "1"],
     ["tab", "close"], ["tab", "activate", "--tab", "1"], ["reload"], ["back"], ["forward"],
     ["key", "Enter"], ["scroll", "--dy", "1"], ["click", "q"], ["dblclick", "q"], ["rclick", "q"], ["hover", "q"],

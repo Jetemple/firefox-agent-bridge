@@ -10,6 +10,8 @@
     return "https://" + u;
   }
 
+  FF.normalizeUrl = normalizeUrl;
+
   FF.tools.navigate = async (args) => {
     const url = normalizeUrl(args.url);
     if (args.tabId != null) {

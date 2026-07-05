@@ -23,6 +23,7 @@
       "restricted.js",
       "tools/tabs-summary.js",
       "tools/navigate.js",
+      "tools/open-tab.js",
       "tools/screenshot.js",
       "tools/get-page-text.js",
       "tools/click.js",

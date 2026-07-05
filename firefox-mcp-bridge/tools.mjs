@@ -37,6 +37,18 @@ export const TOOLS = [
     },
   },
   {
+    name: "open_tab",
+    description:
+      "Open a URL in a new tab WITHOUT focusing it (set active: true to focus). Returns the new tabId.",
+    inputSchema: {
+      url: z.string().describe("URL to open (with or without protocol)"),
+      active: z
+        .boolean()
+        .describe("Focus the new tab. Default: false — agents must not steal the user's focus.")
+        .optional(),
+    },
+  },
+  {
     name: "screenshot",
     description:
       "Capture a screenshot of a tab's visible viewport. Returns a PNG/JPEG image. Note: passing tabId activates and focuses that tab before capture.",

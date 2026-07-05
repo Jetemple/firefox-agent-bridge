@@ -6,6 +6,8 @@ import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 
 const SOURCE = readFileSync(new URL("../firefox-extension/background.js", import.meta.url), "utf8");
+const NAVIGATE_SOURCE = readFileSync(new URL("../firefox-extension/tools/navigate.js", import.meta.url), "utf8");
+const OPEN_TAB_SOURCE = readFileSync(new URL("../firefox-extension/tools/open-tab.js", import.meta.url), "utf8");
 
 class FakeWebSocket {
   static instances = [];
@@ -64,6 +66,46 @@ function loadBackground({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
   };
   createContext(sandbox);
   runInContext(SOURCE, sandbox, { filename: "background.js" });
+  return { FF: sandbox.FFBridge, stored };
+}
+
+function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
+  const listeners = () => ({ addListener: () => {} });
+  const stored = { ...storageData };
+  const sandbox = {
+    console,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    crypto: { randomUUID: () => "test-run-id" },
+    WebSocket:
+      WebSocketCtor ??
+      class {
+        constructor() {
+          throw new Error("no network in tests");
+        }
+      },
+    browser: {
+      storage: {
+        local: {
+          set: async (obj) => Object.assign(stored, obj),
+          get: async (key) => (key in stored ? { [key]: stored[key] } : {}),
+        },
+      },
+      runtime: {
+        sendMessage: () => Promise.resolve(),
+        getManifest: () => ({ version: "0.0-test" }),
+        onStartup: listeners(),
+        onInstalled: listeners(),
+        onMessage: listeners(),
+      },
+      alarms: { create: () => {}, onAlarm: listeners() },
+      tabs,
+    },
+  };
+  createContext(sandbox);
+  runInContext(SOURCE, sandbox, { filename: "background.js" });
+  runInContext(NAVIGATE_SOURCE, sandbox, { filename: "navigate.js" });
+  runInContext(OPEN_TAB_SOURCE, sandbox, { filename: "open-tab.js" });
   return { FF: sandbox.FFBridge, stored };
 }
 
@@ -164,4 +206,32 @@ test("set_profile_name persists, re-sends hello BEFORE the tool reply, and valid
   await new Promise((r) => setImmediate(r));
   assert.equal(sock.sent[0].error.code, "BAD_NAME");
   assert.equal(stored.profileName, "research");
+});
+
+test("open_tab creates a background tab with a normalized url", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    tabs: {
+      create: async (opts) => {
+        created.push(opts);
+        return { id: 55, windowId: 2 };
+      },
+    },
+  });
+  const result = await FF.tools.open_tab({ url: "example.com" });
+  assert.equal(created.length, 1);
+  assert.equal(created[0].url, "https://example.com");
+  assert.equal(created[0].active, false);
+  assert.equal(result.tabId, 55);
+  assert.equal(result.windowId, 2);
+  assert.equal(result.url, "https://example.com");
+});
+
+test("open_tab activates only when asked", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    tabs: { create: async (opts) => (created.push(opts), { id: 1, windowId: 1 }) },
+  });
+  await FF.tools.open_tab({ url: "https://x.com", active: true });
+  assert.equal(created[0].active, true);
 });
