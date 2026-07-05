@@ -9,6 +9,7 @@ import {
   validateDispatchBody,
   createBridgeHttpServer,
 } from "./http-server.mjs";
+import { createSessionStore } from "./sessions.mjs";
 
 const TOKEN = "tok-file-secret";
 
@@ -20,14 +21,27 @@ function fakeReq({ remote = "127.0.0.1", origin, contentType = "application/json
   return { url, headers, socket: { remoteAddress: remote } };
 }
 
-function stubRelay({ result = { ok: true }, error = null, connected = true } = {}) {
+// `results` (per-tool overrides, keyed by tool name) supports the dispatch
+// envelope tests below without disturbing the plain `result`/`error` shape
+// the pre-existing tests rely on (they never populate `results`, so
+// `tool in results` is always false and the old fallback path runs
+// unchanged). `profiles` backs the new session/profile resolution paths;
+// plain dispatch tests never call it.
+function stubRelay({ result = { ok: true }, error = null, connected = true, profiles = [], results = {} } = {}) {
   const calls = [];
   return {
     calls,
     clientCount: () => (connected ? 1 : 0),
-    dispatch: (tool, args, opts) => {
+    profiles: () => profiles,
+    dispatch: async (tool, args, opts) => {
       calls.push({ tool, args, opts });
-      return error ? Promise.reject(error) : Promise.resolve(result);
+      if (tool in results) {
+        const r = results[tool];
+        if (r instanceof Error) throw { code: r.message, message: r.message };
+        return r;
+      }
+      if (error) throw error;
+      return result;
     },
   };
 }
@@ -36,6 +50,19 @@ async function listen(parts) {
   await new Promise((r) => parts.server.listen(0, "127.0.0.1", r));
   const { port } = parts.server.address();
   return { port, close: () => new Promise((r) => parts.server.close(r)) };
+}
+
+async function startServer({ relay, sessions, fileToken = TOKEN } = {}) {
+  const parts = createBridgeHttpServer({ relay, sessions, fileToken, envToken: null });
+  const { port, close } = await listen(parts);
+  return { url: `http://127.0.0.1:${port}`, close, parts };
+}
+
+async function postDispatch(url, body, { token = TOKEN } = {}) {
+  const headers = { "content-type": "application/json" };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const res = await fetch(`${url}/dispatch`, { method: "POST", headers, body: JSON.stringify(body) });
+  return { status: res.status, body: await res.json() };
 }
 
 // --- isLoopbackAddress ---
@@ -224,6 +251,124 @@ test("malformed absolute-form request-target does not crash the process; server 
   } finally {
     await close();
   }
+});
+
+// --- dispatch envelope: sessions, profiles, bridge pseudo-tools ---
+
+test("session dispatch injects the bound tabId and routes to the session's profile", async () => {
+  const relay = stubRelay({
+    profiles: [{ name: "work", runId: "run-1", connectedAt: 1 }],
+    results: { get_page_text: { text: "hi" } },
+  });
+  const sessions = createSessionStore({ filePath: null });
+  sessions.bind("research", { profile: "work", tabId: 42, runId: "run-1", url: "https://x.com" });
+  const { url, close } = await startServer({ relay, sessions });
+  const res = await postDispatch(url, { tool: "get_page_text", session: "research" });
+  assert.deepEqual(res.body.result, { text: "hi" });
+  assert.deepEqual(relay.calls[0], {
+    tool: "get_page_text",
+    args: { tabId: 42 },
+    opts: { profile: "work" },
+  });
+  await close();
+});
+
+test("session dispatch fails safe: SESSION_NOT_FOUND, runId mismatch, TAB_NOT_FOUND wrap", async () => {
+  const relay = stubRelay({
+    profiles: [{ name: "work", runId: "run-2", connectedAt: 1 }], // Firefox restarted
+    results: { get_page_text: new Error("TAB_NOT_FOUND") },
+  });
+  const sessions = createSessionStore({ filePath: null });
+  sessions.bind("research", { profile: "work", tabId: 42, runId: "run-1", url: null });
+  const { url, close } = await startServer({ relay, sessions });
+
+  let res = await postDispatch(url, { tool: "get_page_text", session: "ghost" });
+  assert.equal(res.body.error.code, "SESSION_NOT_FOUND");
+
+  res = await postDispatch(url, { tool: "get_page_text", session: "research" });
+  assert.equal(res.body.error.code, "SESSION_STALE");
+  assert.equal(relay.calls.length, 0, "stale session must never dispatch");
+
+  sessions.bind("research", { profile: "work", tabId: 42, runId: "run-2", url: null });
+  res = await postDispatch(url, { tool: "get_page_text", session: "research" });
+  assert.equal(res.body.error.code, "SESSION_STALE", "TAB_NOT_FOUND wraps to SESSION_STALE");
+  await close();
+});
+
+test("DISPATCH_CONFLICT: session+profile, session+args.tabId, session on a non-tab tool", async () => {
+  const { url, close } = await startServer({ relay: stubRelay(), sessions: createSessionStore({ filePath: null }) });
+  for (const body of [
+    { tool: "get_page_text", session: "s", profile: "p" },
+    { tool: "get_page_text", session: "s", args: { tabId: 1 } },
+    { tool: "open_tab", session: "s", args: { url: "https://x.com" } },
+  ]) {
+    const res = await postDispatch(url, body);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error.code, "DISPATCH_CONFLICT");
+  }
+  await close();
+});
+
+test("session_bind validates the tab, records runId, and close_tab removes the session", async () => {
+  const relay = stubRelay({
+    profiles: [{ name: "work", runId: "run-1", connectedAt: 1 }],
+    results: {
+      get_tabs_summary: { tabs: [{ id: 42, url: "https://x.com", title: "X" }] },
+      close_tab: { closed: true, tabId: 42 },
+    },
+  });
+  const sessions = createSessionStore({ filePath: null });
+  const { url, close } = await startServer({ relay, sessions });
+
+  let res = await postDispatch(url, { tool: "session_bind", args: { name: "research", tabId: 42 } });
+  assert.deepEqual(res.body.result, {
+    name: "research", profile: "work", tabId: 42, url: "https://x.com", previous: null,
+  });
+
+  res = await postDispatch(url, { tool: "session_bind", args: { name: "bad", tabId: 999 } });
+  assert.equal(res.body.error.code, "TAB_NOT_FOUND");
+
+  res = await postDispatch(url, { tool: "close_tab", session: "research" });
+  assert.equal(res.body.result.closed, true);
+  assert.equal(sessions.get("research"), undefined, "close_tab via session removes the record");
+  await close();
+});
+
+test("session_list computes liveness and current url; profiles_list lists connections", async () => {
+  const relay = stubRelay({
+    profiles: [{ name: "work", runId: "run-1", connectedAt: 1 }],
+    results: { get_tabs_summary: { tabs: [{ id: 42, url: "https://now.example", title: "" }] } },
+  });
+  const sessions = createSessionStore({ filePath: null });
+  sessions.bind("live-one", { profile: "work", tabId: 42, runId: "run-1", url: "https://old.example" });
+  sessions.bind("dead-one", { profile: "gone", tabId: 7, runId: "run-9", url: "https://dead.example" });
+  const { url, close } = await startServer({ relay, sessions });
+
+  let res = await postDispatch(url, { tool: "session_list" });
+  const byName = Object.fromEntries(res.body.result.sessions.map((s) => [s.name, s]));
+  assert.equal(byName["live-one"].live, true);
+  assert.equal(byName["live-one"].url, "https://now.example", "live sessions show the CURRENT url");
+  assert.equal(byName["dead-one"].live, false);
+
+  res = await postDispatch(url, { tool: "profiles_list" });
+  assert.deepEqual(res.body.result.profiles, [{ name: "work", runId: "run-1", connectedAt: 1 }]);
+  await close();
+});
+
+test("set_profile_name preflights NAME_IN_USE and old-extension binds get EXTENSION_OUTDATED", async () => {
+  const relay = stubRelay({
+    profiles: [
+      { name: "work", runId: "run-1", connectedAt: 1 },
+      { name: "default", runId: null, connectedAt: 2 }, // legacy extension
+    ],
+  });
+  const sessions = createSessionStore({ filePath: null });
+  const { url, close } = await startServer({ relay, sessions });
+  let res = await postDispatch(url, { tool: "set_profile_name", args: { name: "work" }, profile: "default" });
+  assert.equal(res.body.error.code, "NAME_IN_USE");
+  res = await postDispatch(url, { tool: "session_bind", args: { name: "s", tabId: 1 }, profile: "default" });
+  assert.equal(res.body.error.code, "EXTENSION_OUTDATED");
+  await close();
 });
 
 // --- per-session /mcp ---

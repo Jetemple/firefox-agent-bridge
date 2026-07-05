@@ -42,13 +42,19 @@ export function createRemoteRelay({
   const timer = setInterval(probe, pollMs);
   timer.unref?.();
 
-  async function dispatch(tool, args, { timeoutMs } = {}) {
+  async function dispatch(tool, args, { timeoutMs, session, profile } = {}) {
     let res;
     try {
       res = await fetchFn(`${base}/dispatch`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-        body: JSON.stringify({ tool, args: args ?? {}, ...(timeoutMs ? { timeoutMs } : {}) }),
+        body: JSON.stringify({
+          tool,
+          args: args ?? {},
+          ...(timeoutMs ? { timeoutMs } : {}),
+          ...(session ? { session } : {}),
+          ...(profile ? { profile } : {}),
+        }),
       });
     } catch (err) {
       log(`owner unreachable: ${err?.message ?? err}`);

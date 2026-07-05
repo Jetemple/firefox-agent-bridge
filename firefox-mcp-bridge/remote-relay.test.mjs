@@ -141,6 +141,20 @@ test("RemoteRelay clientCount goes stale-safe (0) after a probe against a degrad
   }
 });
 
+test("dispatch forwards session and profile in the POST body", async () => {
+  const bodies = [];
+  const fetchFn = async (url, opts) => {
+    if (String(url).endsWith("/dispatch")) bodies.push(JSON.parse(opts.body));
+    return { ok: true, json: async () => ({ result: {} }) };
+  };
+  const relay = createRemoteRelay({ ssePort: 1, token: "t", fetchFn });
+  await relay.dispatch("get_page_text", {}, { session: "research" });
+  await relay.dispatch("get_page_text", {}, { profile: "work" });
+  assert.equal(bodies[0].session, "research");
+  assert.equal(bodies[1].profile, "work");
+  await relay.close();
+});
+
 test("SwitchableRelay delegates and swap() redirects future calls", async () => {
   const a = { dispatch: async () => "from-a", clientCount: () => 1, close: async () => {} };
   const b = { dispatch: async () => "from-b", clientCount: () => 0, close: async () => {} };
