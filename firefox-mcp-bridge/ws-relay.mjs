@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 export const DEFAULT_PORT = 3002;
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_TIMEOUT_MS = 15000;
+export const HELLO_GRACE_MS = 2000;
+const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 // The relay binds loopback, but a browser still lets web pages open
 // ws://127.0.0.1:3002. A page always presents an http(s)/ws(s)/ftp Origin;
@@ -17,11 +19,18 @@ export function isAllowedWsOrigin(origin) {
 }
 
 // createRelay starts a WebSocket server bound to host:port and relays MCP tool
-// calls to the most-recently-connected Firefox extension client.
+// calls to Firefox extension clients, multiplexed by profile name. Each
+// extension connection announces itself with a `hello` control frame
+// ({ type: "hello", profileName, runId, version }); until it does (or the
+// grace period expires), the connection is unclassified and not routable.
+// Within a profile name, the newest connection wins — the previous one is
+// drained so its in-flight requests reject immediately instead of hanging.
 //
 // Returns:
-//   dispatch(tool, args) -> Promise<result>   (rejects with { code, message })
-//   clientCount() -> 0 | 1
+//   dispatch(tool, args, { timeoutMs?, profile? }) -> Promise<result>
+//                                               (rejects with { code, message })
+//   profiles() -> Array<{ name, runId, connectedAt }>  (open, classified connections)
+//   clientCount() -> number                    (open, classified connections)
 //   ready: Promise<{ port }>                   (resolves once listening)
 //   port: number | undefined                   (actual bound port)
 //   close() -> Promise<void>                   (rejects pending, terminates sockets)
@@ -30,6 +39,7 @@ export function createRelay({
   host = DEFAULT_HOST,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   allowAnyOrigin = false,
+  helloGraceMs = HELLO_GRACE_MS,
   WebSocketServerCtor = WebSocketServer,
   uuid = randomUUID,
   log = () => {},
@@ -43,7 +53,8 @@ export function createRelay({
       };
   const wss = new WebSocketServerCtor({ host, port, verifyClient });
   const pending = new Map(); // id -> { resolve, reject, timer, socket }
-  let activeClient = null;
+  const connections = new Map(); // profileName -> ws (classified, may be stale until 'close')
+  const perSocket = new Map(); // ws -> { profile, runId, connectedAt, graceTimer }
 
   const ready = new Promise((resolve, reject) => {
     wss.once("listening", () => resolve({ port: wss.address().port }));
@@ -71,23 +82,45 @@ export function createRelay({
     return Boolean(socket) && socket.readyState === WebSocket.OPEN;
   }
 
-  wss.on("connection", (ws) => {
-    // Newest connection wins. Drain the previous client so its in-flight
-    // requests reject immediately instead of hanging until WS_TIMEOUT.
-    if (activeClient && activeClient !== ws) {
-      rejectPendingForSocket(
-        activeClient,
-        "CLIENT_DISCONNECTED",
-        "Replaced by a newer Firefox connection",
-      );
-      try {
-        activeClient.close(1000, "replaced by newer connection");
-      } catch {
-        /* ignore */
-      }
+  function drain(socket, reason) {
+    rejectPendingForSocket(socket, "CLIENT_DISCONNECTED", reason);
+    try {
+      socket.close(1000, reason);
+    } catch {
+      /* ignore */
     }
-    activeClient = ws;
-    log(`Firefox extension connected`);
+  }
+
+  // Classify a connection under a profile name. Called on `hello` (immediate
+  // for new extensions, repeated on rename) or on grace expiry (legacy
+  // extensions that never send hello -> "default"). Newest-wins only within
+  // the same name: that is a reconnect. Cross-profile theft is prevented at
+  // naming time by the bridge's NAME_IN_USE preflight, not here.
+  function classify(ws, helloMsg) {
+    const info = perSocket.get(ws);
+    if (!info || ws.readyState !== WebSocket.OPEN) return;
+    clearTimeout(info.graceTimer);
+    const raw = helloMsg?.profileName;
+    const name = typeof raw === "string" && PROFILE_NAME_RE.test(raw) ? raw : "default";
+    if (info.profile && connections.get(info.profile) === ws) connections.delete(info.profile);
+    const incumbent = connections.get(name);
+    if (incumbent && incumbent !== ws) {
+      log(`profile "${name}" reconnected — draining the previous connection`);
+      drain(incumbent, `replaced by a newer "${name}" connection`);
+    }
+    connections.set(name, ws);
+    info.profile = name;
+    info.runId = typeof helloMsg?.runId === "string" ? helloMsg.runId : null;
+    log(`Firefox extension connected as profile "${name}"`);
+  }
+
+  wss.on("connection", (ws) => {
+    const info = { profile: null, runId: null, connectedAt: Date.now(), graceTimer: null };
+    perSocket.set(ws, info);
+    // Pre-hello grace: not routable, drains nobody. New extensions hello
+    // immediately; legacy ones classify as "default" when the grace expires.
+    info.graceTimer = setTimeout(() => classify(ws, null), helloGraceMs);
+    info.graceTimer.unref?.();
 
     ws.on("message", (data) => {
       let msg;
@@ -96,6 +129,11 @@ export function createRelay({
       } catch {
         return; // not JSON — ignore
       }
+      if (msg?.type === "hello") {
+        classify(ws, msg);
+        return;
+      }
+      if (msg?.type != null) return; // unknown control frame — ignore
       const p = pending.get(msg?.id);
       if (!p) return; // late, unknown, or unsolicited id
       if (p.socket !== ws) return; // response from a non-owning socket
@@ -112,29 +150,67 @@ export function createRelay({
     });
 
     const onGone = () => {
-      rejectPendingForSocket(
-        ws,
-        "CLIENT_DISCONNECTED",
-        "Firefox extension disconnected mid-request",
-      );
-      if (activeClient === ws) {
-        activeClient = null;
-        log(`Firefox extension disconnected`);
+      const meta = perSocket.get(ws);
+      if (meta) {
+        clearTimeout(meta.graceTimer);
+        if (meta.profile && connections.get(meta.profile) === ws) {
+          connections.delete(meta.profile);
+          log(`Firefox extension disconnected (profile "${meta.profile}")`);
+        }
+        perSocket.delete(ws);
       }
+      rejectPendingForSocket(ws, "CLIENT_DISCONNECTED", "Firefox extension disconnected mid-request");
     };
     ws.on("close", onGone);
     ws.on("error", onGone);
   });
 
-  function clientCount() {
-    return isOpen(activeClient) ? 1 : 0;
+  function openProfileNames() {
+    return [...connections.entries()].filter(([, ws]) => isOpen(ws)).map(([name]) => name);
   }
 
-  function dispatch(tool, args, { timeoutMs: callTimeoutMs = timeoutMs } = {}) {
-    const socket = activeClient;
-    if (!isOpen(socket)) {
-      return Promise.reject({ code: "NO_CLIENT", message: "No Firefox extension connected" });
+  function clientCount() {
+    return openProfileNames().length;
+  }
+
+  function profiles() {
+    return openProfileNames().map((name) => {
+      const info = perSocket.get(connections.get(name));
+      return { name, runId: info?.runId ?? null, connectedAt: info?.connectedAt ?? 0 };
+    });
+  }
+
+  function resolveSocket(profile) {
+    if (profile != null) {
+      const s = connections.get(profile);
+      if (isOpen(s)) return { socket: s };
+      const names = openProfileNames();
+      return {
+        error: {
+          code: "PROFILE_NOT_CONNECTED",
+          message: `profile "${profile}" is not connected (connected: ${names.join(", ") || "none"})`,
+        },
+      };
     }
+    const open = openProfileNames();
+    if (open.length === 0) {
+      return { error: { code: "NO_CLIENT", message: "No Firefox extension connected" } };
+    }
+    if (open.length > 1) {
+      return {
+        error: {
+          code: "PROFILE_REQUIRED",
+          message: `multiple Firefox profiles connected (${open.join(", ")}) — specify --profile or use a session`,
+        },
+      };
+    }
+    return { socket: connections.get(open[0]) };
+  }
+
+  function dispatch(tool, args, { timeoutMs: callTimeoutMs = timeoutMs, profile } = {}) {
+    const resolved = resolveSocket(profile);
+    if (resolved.error) return Promise.reject(resolved.error);
+    const socket = resolved.socket;
     const id = uuid();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -167,6 +243,7 @@ export function createRelay({
   return {
     dispatch,
     clientCount,
+    profiles,
     close,
     ready,
     get port() {

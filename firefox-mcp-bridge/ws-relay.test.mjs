@@ -41,6 +41,31 @@ function tryConnect(port, { origin } = {}) {
   });
 }
 
+// Fake extension client: replies { id, result: replyWith } to every tool call.
+function connectClient(port, replyWith = {}) {
+  return new Promise((resolve, reject) => {
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    sock.on("open", () => resolve(sock));
+    sock.on("error", reject);
+    sock.on("message", (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.id != null) sock.send(JSON.stringify({ id: msg.id, result: replyWith }));
+    });
+  });
+}
+
+function hello(sock, profileName, runId = "run-1") {
+  sock.send(JSON.stringify({ type: "hello", profileName, runId, version: "t" }));
+}
+
+async function waitFor(cond, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error("waitFor timed out");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 // --- tests ---------------------------------------------------------------
 
 test("isAllowedWsOrigin rejects web origins, allows the extension and origin-less clients", () => {
@@ -91,6 +116,7 @@ test("dispatch round-trips a request to the connected client and resolves its re
   const client = await connect(port, (msg, ws) => {
     ws.send(JSON.stringify({ id: msg.id, result: { echoed: msg.tool, args: msg.args } }));
   });
+  hello(client, null);
   try {
     await waitUntil(() => relay.clientCount() === 1);
     const result = await relay.dispatch("navigate", { url: "https://example.com" });
@@ -106,6 +132,7 @@ test("extension {error} replies reject with the same code and message", async ()
   const client = await connect(port, (msg, ws) => {
     ws.send(JSON.stringify({ id: msg.id, error: { code: "TAB_NOT_FOUND", message: "Tab 999 not found" } }));
   });
+  hello(client, null);
   try {
     await waitUntil(() => relay.clientCount() === 1);
     await assert.rejects(relay.dispatch("click", { x: 1, y: 1 }), (e) => {
@@ -123,6 +150,7 @@ test("a per-call timeoutMs overrides the relay default", { timeout: 2000 }, asyn
   // Relay default is long; the per-call override must make this reject fast.
   const { relay, port } = await startRelay({ timeoutMs: 60000 });
   const client = await connect(port, () => {}); // never replies
+  hello(client, null);
   try {
     await waitUntil(() => relay.clientCount() === 1);
     const started = Date.now();
@@ -140,6 +168,7 @@ test("a per-call timeoutMs overrides the relay default", { timeout: 2000 }, asyn
 test("a client that never responds causes WS_TIMEOUT", async () => {
   const { relay, port } = await startRelay({ timeoutMs: 50 });
   const client = await connect(port, () => {}); // swallow, never reply
+  hello(client, null);
   try {
     await waitUntil(() => relay.clientCount() === 1);
     await assert.rejects(relay.dispatch("get_page_text", {}), (e) => {
@@ -155,6 +184,7 @@ test("a client that never responds causes WS_TIMEOUT", async () => {
 test("client disconnecting mid-request rejects CLIENT_DISCONNECTED (not WS_TIMEOUT)", async () => {
   const { relay, port } = await startRelay({ timeoutMs: 5000 });
   const client = await connect(port, (_msg, ws) => ws.close()); // close instead of replying
+  hello(client, null);
   try {
     await waitUntil(() => relay.clientCount() === 1);
     await assert.rejects(relay.dispatch("screenshot", {}), (e) => {
@@ -169,6 +199,7 @@ test("client disconnecting mid-request rejects CLIENT_DISCONNECTED (not WS_TIMEO
 test("a newer client adoption rejects the previous client's in-flight requests", async () => {
   const { relay, port } = await startRelay({ timeoutMs: 5000 });
   const clientA = await connect(port, () => {}); // never replies
+  hello(clientA, null);
   try {
     await waitUntil(() => relay.clientCount() === 1);
     const inflight = relay.dispatch("type", { text: "hi" });
@@ -179,6 +210,7 @@ test("a newer client adoption rejects the previous client's in-flight requests",
       return true;
     });
     const clientB = await connect(port); // adoption drains A
+    hello(clientB, null); // same name ("default") re-key triggers the drain
     await expectRejection;
     clientB.close();
   } finally {
@@ -191,6 +223,7 @@ test("a late or unknown response id is ignored without crashing the relay", asyn
   const client = await connect(port, (msg, ws) => {
     ws.send(JSON.stringify({ id: msg.id, result: { ok: true } }));
   });
+  hello(client, null);
   try {
     await waitUntil(() => relay.clientCount() === 1);
     // unsolicited / unknown id — must be dropped silently
@@ -203,4 +236,114 @@ test("a late or unknown response id is ignored without crashing the relay", asyn
     client.close();
     await relay.close();
   }
+});
+
+// --- multiplexing: hello, grace, per-name routing -------------------------
+
+test("two named profiles coexist and dispatch routes by profile", async () => {
+  const relay = createRelay({ port: 0, helloGraceMs: 5000 });
+  const { port } = await relay.ready;
+  const a = await connectClient(port, { from: "A" });
+  hello(a, "work", "run-a");
+  const b = await connectClient(port, { from: "B" });
+  hello(b, "personal", "run-b");
+  await waitFor(() => relay.profiles().length === 2);
+
+  const names = relay.profiles().map((p) => p.name).sort();
+  assert.deepEqual(names, ["personal", "work"]);
+  // route to A: reply comes from A's echo handler
+  const r = await relay.dispatch("get_page_text", {}, { profile: "work" });
+  assert.equal(r.from, "A");
+  await relay.close();
+});
+
+test("no profile given: two connections is PROFILE_REQUIRED, zero is NO_CLIENT", async () => {
+  const relay = createRelay({ port: 0, helloGraceMs: 5000 });
+  const { port } = await relay.ready;
+  await assert.rejects(relay.dispatch("get_page_text", {}), (e) => e.code === "NO_CLIENT");
+  const a = await connectClient(port);
+  hello(a, "work");
+  const b = await connectClient(port);
+  hello(b, "personal");
+  await waitFor(() => relay.profiles().length === 2);
+  await assert.rejects(relay.dispatch("get_page_text", {}), (e) => {
+    assert.equal(e.code, "PROFILE_REQUIRED");
+    assert.match(e.message, /work/);
+    assert.match(e.message, /personal/);
+    return true;
+  });
+  await relay.close();
+});
+
+test("unknown profile rejects PROFILE_NOT_CONNECTED listing connected names", async () => {
+  const relay = createRelay({ port: 0, helloGraceMs: 5000 });
+  const { port } = await relay.ready;
+  const a = await connectClient(port);
+  hello(a, "work");
+  await waitFor(() => relay.profiles().length === 1);
+  await assert.rejects(relay.dispatch("get_page_text", {}, { profile: "nope" }), (e) => {
+    assert.equal(e.code, "PROFILE_NOT_CONNECTED");
+    assert.match(e.message, /work/);
+    return true;
+  });
+  await relay.close();
+});
+
+test("newest-wins applies only within the same profile name", async () => {
+  const relay = createRelay({ port: 0, helloGraceMs: 5000 });
+  const { port } = await relay.ready;
+  const a1 = await connectClient(port);
+  hello(a1, "work", "run-1");
+  const b = await connectClient(port);
+  hello(b, "personal");
+  await waitFor(() => relay.profiles().length === 2);
+  const a2 = await connectClient(port); // same name reconnects
+  hello(a2, "work", "run-2");
+  await waitFor(() => relay.profiles().find((p) => p.name === "work")?.runId === "run-2");
+  assert.equal(relay.profiles().length, 2, "personal must survive work's reconnect");
+  await waitFor(() => a1.readyState === a1.CLOSED); // old work connection drained
+  assert.equal(b.readyState, b.OPEN);
+  await relay.close();
+});
+
+test("a hello-less connection classifies as default after the grace period", async () => {
+  const relay = createRelay({ port: 0, helloGraceMs: 30 });
+  const { port } = await relay.ready;
+  const legacy = await connectClient(port); // never sends hello
+  assert.equal(relay.clientCount(), 0, "unclassified connections are not routable");
+  await waitFor(() => relay.clientCount() === 1);
+  assert.deepEqual(relay.profiles()[0], {
+    name: "default",
+    runId: null,
+    connectedAt: relay.profiles()[0].connectedAt,
+  });
+  const r = await relay.dispatch("get_page_text", {}); // sole connection: no profile needed
+  assert.ok(r);
+  await relay.close();
+});
+
+test("a pre-hello connection neither drains nor is drained by an unrelated one", async () => {
+  const relay = createRelay({ port: 0, helloGraceMs: 5000 });
+  const { port } = await relay.ready;
+  const named = await connectClient(port);
+  hello(named, "work");
+  await waitFor(() => relay.profiles().length === 1);
+  const inflight = await connectClient(port); // hello not yet sent
+  assert.equal(named.readyState, named.OPEN, "classified connection untouched");
+  hello(inflight, "personal");
+  await waitFor(() => relay.profiles().length === 2);
+  assert.equal(named.readyState, named.OPEN);
+  await relay.close();
+});
+
+test("hello re-keys an already-classified connection (rename)", async () => {
+  const relay = createRelay({ port: 0, helloGraceMs: 5000 });
+  const { port } = await relay.ready;
+  const a = await connectClient(port);
+  hello(a, "work", "run-1");
+  await waitFor(() => relay.profiles().length === 1);
+  hello(a, "research", "run-1"); // set_profile_name re-sends hello on the same socket
+  await waitFor(() => relay.profiles()[0]?.name === "research");
+  assert.equal(relay.profiles().length, 1, "old key removed on re-key");
+  await relay.close();
 });
