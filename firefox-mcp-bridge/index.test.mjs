@@ -26,7 +26,7 @@ test("speaks MCP over stdio and lists every tool", async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [INDEX],
-    env: { ...getDefaultEnvironment(), FIREFOX_BRIDGE_WS_PORT: "0", FIREFOX_BRIDGE_TOKEN_FILE: tokenFile },
+    env: { ...getDefaultEnvironment(), FIREFOX_BRIDGE_WS_PORT: "0", FIREFOX_BRIDGE_SSE_PORT: "0", FIREFOX_BRIDGE_TOKEN_FILE: tokenFile },
   });
   const client = new Client({ name: "test", version: "0" });
   await client.connect(transport);
@@ -44,7 +44,7 @@ test("keeps stdout pure JSON-RPC (logs go to stderr) and exits 0 on SIGTERM", as
   const dir = mkdtempSync(join(tmpdir(), "ffmcp-"));
   const tokenFile = join(dir, "token");
   const child = spawn(process.execPath, [INDEX], {
-    env: { ...process.env, FIREFOX_BRIDGE_WS_PORT: "0", FIREFOX_BRIDGE_WS_TIMEOUT_MS: "200", FIREFOX_BRIDGE_TOKEN_FILE: tokenFile },
+    env: { ...process.env, FIREFOX_BRIDGE_WS_PORT: "0", FIREFOX_BRIDGE_SSE_PORT: "0", FIREFOX_BRIDGE_WS_TIMEOUT_MS: "200", FIREFOX_BRIDGE_TOKEN_FILE: tokenFile },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";
