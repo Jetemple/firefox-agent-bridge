@@ -39,15 +39,19 @@ test("startOwner loads sessions and serves them through /dispatch", async () => 
   sessions.load();
   const config = { ...readConfig({}), port: 0, ssePort: 0 }; // ephemeral ports
   const owner = await startOwner(config, "token-t", { sessions });
-  const port = owner.server.address().port;
-  const res = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: "Bearer token-t" },
-    body: JSON.stringify({ tool: "session_list" }),
-  });
-  const body = await res.json();
-  assert.equal(body.result.sessions[0].name, "research");
-  await owner.close();
+  try {
+    const port = owner.server.address().port;
+    const res = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer token-t" },
+      body: JSON.stringify({ tool: "session_list" }),
+    });
+    const body = await res.json();
+    assert.equal(body.result.sessions[0].name, "research");
+  } finally {
+    await owner.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("speaks MCP over stdio and lists every tool", async () => {
