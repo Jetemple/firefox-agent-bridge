@@ -13,12 +13,34 @@ import { createSessionStore } from "./sessions.mjs";
 
 const TOKEN = "tok-file-secret";
 
-function fakeReq({ remote = "127.0.0.1", origin, contentType = "application/json", token = TOKEN, url = "/dispatch" } = {}) {
+function fakeReq({ remote = "127.0.0.1", origin, contentType = "application/json", token = TOKEN, url = "/dispatch", method = "GET" } = {}) {
   const headers = {};
   if (origin !== undefined) headers.origin = origin;
   if (contentType) headers["content-type"] = contentType;
   if (token) headers.authorization = `Bearer ${token}`;
-  return { url, headers, socket: { remoteAddress: remote } };
+  return { url, method, headers, socket: { remoteAddress: remote } };
+}
+
+// Minimal http.ServerResponse stand-in for exercising the server's `request`
+// listener directly (server.emit-style), without a real socket — needed for
+// /health's loopback check, where the live-server tests below (real fetch
+// against 127.0.0.1) can never produce a non-loopback remoteAddress.
+function fakeRes() {
+  const res = {
+    statusCode: null,
+    headers: null,
+    headersSent: false,
+    body: null,
+    writeHead(status, headers) {
+      res.statusCode = status;
+      res.headers = headers;
+      res.headersSent = true;
+    },
+    end(body) {
+      res.body = body;
+    },
+  };
+  return res;
 }
 
 // `results` (per-tool overrides, keyed by tool name) supports the dispatch
@@ -167,6 +189,26 @@ test("/health reports identity without auth and emits no CORS headers", async ()
   } finally {
     await close();
   }
+});
+
+test("/health refuses a non-loopback source address with 403 FORBIDDEN", async () => {
+  const relay = stubRelay({ connected: true });
+  const parts = createBridgeHttpServer({ relay, startedAt: 0, fileToken: TOKEN, envToken: null });
+  const req = fakeReq({ remote: "192.168.1.9", url: "/health", method: "GET" });
+  const res = fakeRes();
+  parts.server.emit("request", req, res);
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(JSON.parse(res.body), { error: { code: "FORBIDDEN", message: "health is loopback-only" } });
+});
+
+test("/health still answers for loopback sources via the same request path", async () => {
+  const relay = stubRelay({ connected: true });
+  const parts = createBridgeHttpServer({ relay, startedAt: 5, fileToken: TOKEN, envToken: null });
+  const req = fakeReq({ remote: "127.0.0.1", url: "/health", method: "GET" });
+  const res = fakeRes();
+  parts.server.emit("request", req, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(JSON.parse(res.body).name, HEALTH_NAME);
 });
 
 test("/dispatch forwards a valid call and returns the relay result", async () => {
@@ -353,6 +395,32 @@ test("session_list computes liveness and current url; profiles_list lists connec
   res = await postDispatch(url, { tool: "profiles_list" });
   assert.deepEqual(res.body.result.profiles, [{ name: "work", runId: "run-1", connectedAt: 1 }]);
   await close();
+});
+
+test("set_profile_name renaming a profile to its OWN current name is a harmless no-op, not NAME_IN_USE", async () => {
+  const relay = stubRelay({
+    profiles: [
+      { name: "work", runId: "run-1", connectedAt: 1 },
+      { name: "personal", runId: "run-2", connectedAt: 2 },
+    ],
+    results: { set_profile_name: { name: "work" } },
+  });
+  const sessions = createSessionStore({ filePath: null });
+  const { url, close } = await startServer({ relay, sessions });
+  try {
+    // Routed AT "work": renaming "work" to "work" must dispatch through, not NAME_IN_USE.
+    let res = await postDispatch(url, { tool: "set_profile_name", args: { name: "work" }, profile: "work" });
+    assert.equal(res.body.error, undefined, JSON.stringify(res.body));
+    assert.deepEqual(res.body.result, { name: "work" });
+    assert.equal(relay.calls.length, 1);
+    assert.deepEqual(relay.calls[0], { tool: "set_profile_name", args: { name: "work" }, opts: { profile: "work" } });
+
+    // Routed AT "personal": naming it "work" collides with the OTHER connection.
+    res = await postDispatch(url, { tool: "set_profile_name", args: { name: "work" }, profile: "personal" });
+    assert.equal(res.body.error.code, "NAME_IN_USE");
+  } finally {
+    await close();
+  }
 });
 
 test("set_profile_name preflights NAME_IN_USE and old-extension binds get EXTENSION_OUTDATED", async () => {

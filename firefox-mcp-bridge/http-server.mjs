@@ -234,10 +234,15 @@ export function createBridgeHttpServer({
 
       let profile = v.profile;
       let args = v.args;
-      if (v.tool === "set_profile_name" && relay.profiles().some((p) => p.name === v.args.name)) {
+      if (v.tool === "set_profile_name") {
         // NAME_IN_USE preflight: without it, newest-wins-within-name would let
-        // one profile silently steal another's identity.
-        return toolError(res, "NAME_IN_USE", `profile name "${v.args.name}" is already connected — pick another`);
+        // one profile silently steal another's identity. Held by a DIFFERENT
+        // connection is the conflict; renaming a profile to its own current
+        // name (self-rename) is a harmless no-op and must proceed.
+        const target = resolveProfileEntry(v.profile);
+        if (v.args.name !== target.name && relay.profiles().some((p) => p.name === v.args.name)) {
+          return toolError(res, "NAME_IN_USE", `profile name "${v.args.name}" is already connected — pick another`);
+        }
       }
       if (v.session) {
         const rec = sessions.get(v.session);
@@ -343,14 +348,18 @@ export function createBridgeHttpServer({
     }
     const route =
       path === "/health" && req.method === "GET"
-        ? () =>
-            sendJson(res, 200, {
+        ? () => {
+            if (!isLoopbackAddress(req.socket?.remoteAddress)) {
+              return sendJson(res, 403, { error: { code: "FORBIDDEN", message: "health is loopback-only" } });
+            }
+            return sendJson(res, 200, {
               name: HEALTH_NAME,
               version: SERVER_VERSION,
               pid: process.pid,
               startedAt,
               extensionConnected: relay.clientCount() > 0,
-            })
+            });
+          }
         : path === "/dispatch" && req.method === "POST"
           ? () => handleDispatch(req, res)
           : path === "/mcp"
