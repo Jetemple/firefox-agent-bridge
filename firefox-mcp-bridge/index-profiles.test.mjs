@@ -104,11 +104,11 @@ test("sessions + profiles end-to-end against a real bridge", async () => {
       tabs: [{ id: 7, url: "https://me.example", title: "P", active: true }],
     });
     sockets.push(work, personal);
-    // /health.extensionConnected counts CLASSIFIED connections; both fakes hello
-    // immediately, but the sockets connect async — poll until both are up.
+    // Both fakes hello immediately, but the sockets connect async. Wait for both
+    // profiles to be present before proceeding with assertions.
     await waitFor(async () => {
-      const health = await (await fetch(`http://127.0.0.1:${ssePort}/health`)).json();
-      return health.extensionConnected;
+      const p = await ff("--json", "profiles");
+      return p.code === 0 && p.out.includes("work") && p.out.includes("personal");
     });
 
     // ff runs against the e2e bridge via env overrides; fresh out/err each call.
@@ -158,6 +158,7 @@ test("sessions + profiles end-to-end against a real bridge", async () => {
     r = await ff("-s", "research", "text");
     assert.equal(r.code, 1);
     assert.match(r.err, /SESSION_STALE/);
+    assert.match(r.err, /restarted or profile/);
 
     r = await ff("bind", "research", "--tab", "42", "--profile", "work");
     assert.equal(r.code, 0, r.err);
