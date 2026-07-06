@@ -12,6 +12,11 @@ node_modules/
 # logs
 *.log
 
+# benchmark outputs
+bench/results/
+test-results/
+playwright-report/
+
 # macOS
 .DS_Store
 
