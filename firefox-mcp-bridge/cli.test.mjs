@@ -13,8 +13,9 @@ function tmpDir() {
 }
 
 // Stub owner with scripted /dispatch results per tool.
-function stubOwner({ results = {}, extensionConnected = true, healthPid = process.pid } = {}) {
+function stubOwner({ results = {}, resultsFn, extensionConnected = true, healthPid = process.pid } = {}) {
   const requests = [];
+  const dispatchBodies = [];
   let down = false;
   const server = createServer(async (req, res) => {
     if (down) {
@@ -32,12 +33,24 @@ function stubOwner({ results = {}, extensionConnected = true, healthPid = proces
       for await (const c of req) raw += c;
       const body = JSON.parse(raw);
       requests.push({ auth: req.headers.authorization, body });
-      let out = results[body.tool] ?? { result: { ok: true } };
+      dispatchBodies.push(body);
+      // resultsFn (a function of the whole request body) takes priority so a
+      // test can vary the answer by envelope (e.g. by body.profile) rather
+      // than just by tool name.
+      let out = resultsFn ? resultsFn(body) : results[body.tool];
+      if (out === undefined) out = { result: { ok: true } };
       // Scripted result may be a function of the per-tool call count, so a test
       // can return "not found" for the first N polls and "found" afterwards.
       if (typeof out === "function") {
         const nth = requests.filter((r) => r.body.tool === body.tool).length - 1;
         out = out(nth, body);
+      }
+      // A scripted entry that is a bare tool-result payload (no top-level
+      // `result`/`error` — i.e. what the tool would actually return, not the
+      // HTTP envelope) is auto-wrapped as a success response. Entries already
+      // shaped like the envelope (the pre-existing convention) pass through.
+      if (out && typeof out === "object" && !("result" in out) && !("error" in out)) {
+        out = { result: out };
       }
       res.end(JSON.stringify(out));
       return;
@@ -50,6 +63,7 @@ function stubOwner({ results = {}, extensionConnected = true, healthPid = proces
       resolve({
         port: server.address().port,
         requests,
+        dispatchBodies,
         setDown: (v) => (down = v),
         close: () => new Promise((r) => server.close(r)),
       }),
@@ -81,6 +95,23 @@ function ctx(owner, { tokenFile } = {}) {
     },
   };
 }
+
+// stubOwner + ctx combined for the envelope/session/profile tests below: spins
+// up a stub bridge plus runCli overrides in one call, and exposes the parsed
+// /dispatch bodies directly (not the {auth, body} wrapper `requests` uses)
+// since those tests assert on envelope fields like `.session`/`.profile`.
+// Owners are closed automatically once the whole file's tests finish (these
+// tests don't hold a `close()` themselves — see pendingOwnerCloses below).
+const pendingOwnerCloses = [];
+async function stubOwnerContext(options) {
+  const owner = await stubOwner(options);
+  pendingOwnerCloses.push(owner.close);
+  const c = ctx(owner);
+  return { dispatchBodies: owner.dispatchBodies, out: c.out, err: c.err, overrides: c.opts };
+}
+test.after(async () => {
+  await Promise.all(pendingOwnerCloses.splice(0).map((close) => close()));
+});
 
 test("ff tabs prints the tab list and sends the bearer token", async () => {
   const owner = await stubOwner({
@@ -471,6 +502,63 @@ test("ff stop handles a stale bridge pid gracefully (process already dead)", asy
   } finally {
     await owner.close();
   }
+});
+
+test("ff -s research text sends the session in the dispatch body", async () => {
+  const c = await stubOwnerContext({ results: { get_page_text: { text: "hi" } } });
+  const code = await runCli(["-s", "research", "text"], c.overrides);
+  assert.equal(code, 0);
+  assert.equal(c.dispatchBodies[0].session, "research");
+  assert.equal(c.dispatchBodies[0].tool, "get_page_text");
+});
+
+test("ff open --as binds a session after opening and prints the binding", async () => {
+  const c = await stubOwnerContext({
+    results: {
+      open_tab: { tabId: 55, windowId: 2, url: "https://x.com" },
+      session_bind: { name: "research", profile: "work", tabId: 55, url: "https://x.com", previous: null },
+    },
+  });
+  const code = await runCli(["open", "https://x.com", "--as", "research"], c.overrides);
+  assert.equal(code, 0);
+  assert.deepEqual(c.dispatchBodies.map((b) => b.tool), ["open_tab", "session_bind"]);
+  assert.deepEqual(c.dispatchBodies[1].args, { name: "research", tabId: 55 });
+  assert.match(c.out.join(""), /session research → tab 55 \(profile work\)/);
+});
+
+test("ff --profile work nav routes the envelope profile", async () => {
+  const c = await stubOwnerContext({ results: { navigate: { tabId: 3, url: "https://x.com" } } });
+  await runCli(["--profile", "work", "nav", "https://x.com"], c.overrides);
+  assert.equal(c.dispatchBodies[0].profile, "work");
+});
+
+test("ff tabs fans out per profile when the bridge answers PROFILE_REQUIRED", async () => {
+  const c = await stubOwnerContext({
+    resultsFn: (body) => {
+      if (body.tool === "get_tabs_summary" && !body.profile) {
+        return { error: { code: "PROFILE_REQUIRED", message: "multiple (work, personal)" } };
+      }
+      if (body.tool === "profiles_list") {
+        return { result: { profiles: [{ name: "work", runId: "r1", connectedAt: 1 }, { name: "personal", runId: "r2", connectedAt: 2 }] } };
+      }
+      return { result: { tabs: [{ id: 1, title: `t-${body.profile}`, url: `https://${body.profile}.example`, active: false }] } };
+    },
+  });
+  const code = await runCli(["tabs"], c.overrides);
+  assert.equal(code, 0);
+  const out = c.out.join("");
+  assert.match(out, /\[work\]/);
+  assert.match(out, /\[personal\]/);
+  assert.match(out, /t-work/);
+});
+
+test("SESSION_STALE from the bridge is rendered actionably and exits 1", async () => {
+  const c = await stubOwnerContext({
+    resultsFn: () => ({ error: { code: "SESSION_STALE", message: 'session "research" is stale — rebind' } }),
+  });
+  const code = await runCli(["-s", "research", "text"], c.overrides);
+  assert.equal(code, 1);
+  assert.match(c.err.join(""), /SESSION_STALE.*rebind/);
 });
 
 test("smoke: ff status + ff tabs against a real standalone bridge (no extension)", async () => {

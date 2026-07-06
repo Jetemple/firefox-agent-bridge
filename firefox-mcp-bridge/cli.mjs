@@ -108,15 +108,17 @@ async function resolveJsSource(argv, deps) {
 
 // Client-side `--wait-for <css>`: poll find_element until the selector appears
 // (or the deadline passes), so callers stop guessing fixed `sleep`s after nav.
-async function waitForSelector(settings, token, deps, flags, lastResult) {
+async function waitForSelector(settings, token, deps, flags, lastResult, envelope) {
   const timeoutMs = Number.isFinite(flags.waitTimeout) ? flags.waitTimeout : 10000;
   const args = { selector: flags.waitFor };
-  if (lastResult?.tabId != null) args.tabId = lastResult.tabId;
+  // A session already pins the tab bridge-side — only fall back to the last
+  // step's tab when there is no session in the envelope.
+  if (!envelope.session && lastResult?.tabId != null) args.tabId = lastResult.tabId;
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   for (;;) {
     try {
-      const r = await dispatch(settings, token, deps.fetchFn, "find_element", args, flags.timeout);
+      const r = await dispatch(settings, token, deps.fetchFn, "find_element", args, flags.timeout, envelope);
       if (r?.found) return;
       lastError = null;
     } catch (err) {
@@ -133,13 +135,19 @@ async function waitForSelector(settings, token, deps, flags, lastResult) {
   }
 }
 
-async function dispatch(settings, token, fetchFn, tool, args, timeout) {
+async function dispatch(settings, token, fetchFn, tool, args, timeout, envelope = {}) {
   let res;
   try {
     res = await fetchFn(`http://127.0.0.1:${settings.ssePort}/dispatch`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify({ tool, args, ...(timeout ? { timeoutMs: timeout } : {}) }),
+      body: JSON.stringify({
+        tool,
+        args,
+        ...(timeout ? { timeoutMs: timeout } : {}),
+        ...(envelope.session ? { session: envelope.session } : {}),
+        ...(envelope.profile ? { profile: envelope.profile } : {}),
+      }),
     });
   } catch {
     throw new CliError("lost connection to the bridge mid-call");
@@ -254,7 +262,7 @@ async function runLifecycle(command, settings, deps) {
     return 1;
   }
   const token = deps.token;
-  const summary = await dispatch(settings, token, fetchFn, "get_tabs_summary", {}, undefined);
+  const summary = await dispatch(settings, token, fetchFn, "get_tabs_summary", {}, undefined, {});
   stdout(`extension connected — ${summary?.tabs?.length ?? "?"} tabs\n`);
   return 0;
 }
@@ -303,19 +311,54 @@ export async function runCli(argv, overrides = {}) {
     if (parsed.kind === "lifecycle") return await runLifecycle(parsed.command, settings, deps);
 
     await ensureBridge(settings, deps);
+    const envelope = { session: parsed.flags.session, profile: parsed.flags.profile };
+
+    // `ff tabs` with no explicit --profile, against a bridge juggling several
+    // connected profiles: the tool call comes back PROFILE_REQUIRED, so fan
+    // the summary out across every connected profile instead of surfacing
+    // that error to the user (every other command still sees it unchanged).
+    async function renderTabsAcrossProfiles() {
+      const { profiles } = await dispatch(settings, token, deps.fetchFn, "profiles_list", {}, parsed.flags.timeout, {});
+      const blocks = [];
+      for (const p of profiles) {
+        const summary = await dispatch(settings, token, deps.fetchFn, "get_tabs_summary", {}, parsed.flags.timeout, { profile: p.name });
+        const lines = (summary?.tabs ?? []).map((t) => `${t.id}${t.active ? "*" : " "}  ${t.title ?? ""} — ${t.url ?? ""}`);
+        blocks.push(`[${p.name}]\n${lines.join("\n")}`);
+      }
+      deps.stdout(`${blocks.join("\n\n")}\n`);
+    }
+
     const results = [];
     let prev = null;
-    for (const step of parsed.steps) {
-      const args = step.buildArgs ? step.buildArgs(prev) : step.args;
-      if (args == null) {
-        throw new CliError(`no matching element (${JSON.stringify(parsed.steps[0].args)})`);
+    try {
+      for (const step of parsed.steps) {
+        const args = step.buildArgs ? step.buildArgs(prev) : step.args;
+        if (args == null) {
+          throw new CliError(`no matching element (${JSON.stringify(parsed.steps[0].args)})`);
+        }
+        prev = await dispatch(settings, token, deps.fetchFn, step.tool, args, parsed.flags.timeout, envelope);
+        results.push({ tool: step.tool, result: prev });
       }
-      prev = await dispatch(settings, token, deps.fetchFn, step.tool, args, parsed.flags.timeout);
-      results.push({ tool: step.tool, result: prev });
+    } catch (err) {
+      if (parsed.command === "tabs" && !envelope.profile && err instanceof CliError && /^PROFILE_REQUIRED:/.test(err.message)) {
+        await renderTabsAcrossProfiles();
+        return 0;
+      }
+      throw err;
     }
 
     if (parsed.flags.waitFor) {
-      await waitForSelector(settings, token, deps, parsed.flags, prev);
+      await waitForSelector(settings, token, deps, parsed.flags, prev, envelope);
+    }
+
+    if (parsed.command === "open" && parsed.flags.as) {
+      const opened = results[results.length - 1].result;
+      const bound = await dispatch(
+        settings, token, deps.fetchFn, "session_bind",
+        { name: parsed.flags.as, tabId: opened.tabId }, parsed.flags.timeout, envelope,
+      );
+      deps.stdout(`session ${bound.name} → tab ${bound.tabId} (profile ${bound.profile})\n`);
+      return 0;
     }
 
     if (parsed.command === "screenshot") {
