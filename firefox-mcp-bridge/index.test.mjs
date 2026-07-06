@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { TOOLS } from "./tools.mjs";
+import { readConfig, startOwner } from "./index.mjs";
+import { createSessionStore } from "./sessions.mjs";
 
 const INDEX = resolve(dirname(fileURLToPath(import.meta.url)), "index.mjs");
 
@@ -19,6 +21,34 @@ async function waitUntil(fn, { timeout = 4000, interval = 20 } = {}) {
   }
   throw new Error("waitUntil timed out");
 }
+
+test("readConfig resolves sessionsFile from env with a home default", () => {
+  const c = readConfig({ FIREFOX_BRIDGE_SESSIONS_FILE: "/x/sessions.json" });
+  assert.equal(c.sessionsFile, "/x/sessions.json");
+  const d = readConfig({});
+  assert.match(d.sessionsFile, /\.firefox-mcp[/\\]sessions\.json$/);
+});
+
+test("startOwner loads sessions and serves them through /dispatch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ff-owner-"));
+  const file = join(dir, "sessions.json");
+  const seed = createSessionStore({ filePath: file });
+  seed.bind("research", { profile: "work", tabId: 1, runId: "r", url: null });
+
+  const sessions = createSessionStore({ filePath: file });
+  sessions.load();
+  const config = { ...readConfig({}), port: 0, ssePort: 0 }; // ephemeral ports
+  const owner = await startOwner(config, "token-t", { sessions });
+  const port = owner.server.address().port;
+  const res = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer token-t" },
+    body: JSON.stringify({ tool: "session_list" }),
+  });
+  const body = await res.json();
+  assert.equal(body.result.sessions[0].name, "research");
+  await owner.close();
+});
 
 test("speaks MCP over stdio and lists every tool", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ffmcp-"));

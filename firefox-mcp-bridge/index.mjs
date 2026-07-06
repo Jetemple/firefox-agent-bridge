@@ -9,6 +9,9 @@ import { loadOrCreateToken, DEFAULT_TOKEN_PATH } from "../scripts/secure-config.
 import { execSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { createSessionStore } from "./sessions.mjs";
 // stdout is reserved exclusively for the MCP StdioServerTransport. Any stray
 // stdout write corrupts the JSON-RPC stream, so route accidental console.log /
 // console.info to stderr. Explicit diagnostics use logErr().
@@ -87,7 +90,7 @@ export async function probeBridgeHealth({ ssePort, sseHost = "127.0.0.1", fetchF
 // Ownership = BOTH ports. A WS-only bridge would be invisible to /health
 // probes and would get killed by the next instance as a "zombie", so if the
 // HTTP port can't be bound the instance must not own the relay either.
-export async function startOwner(config, fileToken, { startedAt = Date.now(), log = () => {} } = {}) {
+export async function startOwner(config, fileToken, { startedAt = Date.now(), log = () => {}, sessions } = {}) {
   const relay = createRelay({
     port: config.port,
     host: config.host,
@@ -102,6 +105,7 @@ export async function startOwner(config, fileToken, { startedAt = Date.now(), lo
     fileToken,
     envToken: config.sseToken,
     log,
+    sessions,
   });
   try {
     await new Promise((resolve, reject) => {
@@ -146,7 +150,8 @@ export function readConfig(env = process.env) {
     env.FIREFOX_BRIDGE_WS_ALLOW_ANY_ORIGIN === "1" ||
     env.FIREFOX_BRIDGE_WS_ALLOW_ANY_ORIGIN === "true";
   const tokenFile = env.FIREFOX_BRIDGE_TOKEN_FILE || DEFAULT_TOKEN_PATH;
-  return { port, host, timeoutMs, ssePort, sseHost, sseToken, allowAnyOrigin, tokenFile };
+  const sessionsFile = env.FIREFOX_BRIDGE_SESSIONS_FILE || join(homedir(), ".firefox-mcp", "sessions.json");
+  return { port, host, timeoutMs, ssePort, sseHost, sseToken, allowAnyOrigin, tokenFile, sessionsFile };
 }
 
 async function main() {
@@ -166,9 +171,16 @@ async function main() {
   let role = null;
   let requestPromotion = () => {}; // bound after the façade exists
 
+  // Sessions live with the OWNER role. The store is created here but loaded
+  // only inside becomeOwner() — a follower that promotes later must read the
+  // file at promotion time, never at process start, so it cannot resurrect
+  // state the previous owner already changed.
+  const sessionStore = createSessionStore({ filePath: config.sessionsFile, log: logErr });
+
   // Claim BOTH ports and start serving as the owner. Also used by promotion.
   async function becomeOwner() {
-    ownerParts = await startOwner(config, fileToken, { startedAt, log: logErr });
+    sessionStore.load();
+    ownerParts = await startOwner(config, fileToken, { startedAt, log: logErr, sessions: sessionStore });
     role = "owner";
     logErr(
       `listening on ws://${config.host}:${ownerParts.relay.port} (per-request timeout ${config.timeoutMs}ms)`,
