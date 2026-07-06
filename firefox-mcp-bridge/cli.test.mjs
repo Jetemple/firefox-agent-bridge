@@ -45,6 +45,14 @@ function stubOwner({ results = {}, resultsFn, extensionConnected = true, healthP
         const nth = requests.filter((r) => r.body.tool === body.tool).length - 1;
         out = out(nth, body);
       }
+      // A scripted entry shaped as { status, body } drives a non-2xx HTTP
+      // response (e.g. 400 with an { error } body) — distinct from the
+      // always-200 shapes below, which only vary the JSON payload.
+      if (out && typeof out === "object" && "status" in out && "body" in out) {
+        res.statusCode = out.status;
+        res.end(JSON.stringify(out.body));
+        return;
+      }
       // A scripted entry that is a bare tool-result payload (no top-level
       // `result`/`error` — i.e. what the tool would actually return, not the
       // HTTP envelope) is auto-wrapped as a success response. Entries already
@@ -550,6 +558,61 @@ test("ff tabs fans out per profile when the bridge answers PROFILE_REQUIRED", as
   assert.match(out, /\[work\]/);
   assert.match(out, /\[personal\]/);
   assert.match(out, /t-work/);
+});
+
+test("ff tabs --json fans out per profile as parseable JSON ({profiles:[{name,tabs}]})", async () => {
+  const c = await stubOwnerContext({
+    resultsFn: (body) => {
+      if (body.tool === "get_tabs_summary" && !body.profile) {
+        return { error: { code: "PROFILE_REQUIRED", message: "multiple (work, personal)" } };
+      }
+      if (body.tool === "profiles_list") {
+        return { result: { profiles: [{ name: "work", runId: "r1", connectedAt: 1 }, { name: "personal", runId: "r2", connectedAt: 2 }] } };
+      }
+      return { result: { tabs: [{ id: 1, title: `t-${body.profile}`, url: `https://${body.profile}.example`, active: false }] } };
+    },
+  });
+  const code = await runCli(["tabs", "--json"], c.overrides);
+  assert.equal(code, 0);
+  const parsed = JSON.parse(c.out.join(""));
+  assert.deepEqual(parsed, {
+    profiles: [
+      { name: "work", tabs: [{ id: 1, title: "t-work", url: "https://work.example", active: false }] },
+      { name: "personal", tabs: [{ id: 1, title: "t-personal", url: "https://personal.example", active: false }] },
+    ],
+  });
+});
+
+test("ff open --as --json prints the session_bind result as JSON, not the human line", async () => {
+  const c = await stubOwnerContext({
+    results: {
+      open_tab: { tabId: 55, windowId: 2, url: "https://x.com" },
+      session_bind: { name: "research", profile: "work", tabId: 55, url: "https://x.com", previous: null },
+    },
+  });
+  const code = await runCli(["open", "https://x.com", "--as", "research", "--json"], c.overrides);
+  assert.equal(code, 0);
+  const parsed = JSON.parse(c.out.join(""));
+  assert.deepEqual(parsed, { name: "research", profile: "work", tabId: 55, url: "https://x.com", previous: null });
+});
+
+test("dispatch renders CODE: message when the bridge returns a non-2xx status with an error code", async () => {
+  const owner = await stubOwner({
+    results: {
+      get_tabs_summary: {
+        status: 400,
+        body: { error: { code: "DISPATCH_CONFLICT", message: "session and profile are mutually exclusive" } },
+      },
+    },
+  });
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["tabs"], c.opts);
+    assert.equal(code, 1);
+    assert.match(c.err.join(""), /DISPATCH_CONFLICT: session and profile are mutually exclusive/);
+  } finally {
+    await owner.close();
+  }
 });
 
 test("SESSION_STALE from the bridge is rendered actionably and exits 1", async () => {

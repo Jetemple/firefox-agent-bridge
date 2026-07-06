@@ -153,7 +153,13 @@ async function dispatch(settings, token, fetchFn, tool, args, timeout, envelope 
     throw new CliError("lost connection to the bridge mid-call");
   }
   const body = await res.json().catch(() => null);
-  if (!res.ok) throw new CliError(body?.error?.message ?? `bridge rejected the call (HTTP ${res.status})`);
+  if (!res.ok) {
+    throw new CliError(
+      body?.error?.code
+        ? `${body.error.code}: ${body.error.message}`
+        : (body?.error?.message ?? `bridge rejected the call (HTTP ${res.status})`),
+    );
+  }
   if (body?.error) throw new CliError(`${body.error.code}: ${body.error.message}`);
   return body.result;
 }
@@ -319,6 +325,15 @@ export async function runCli(argv, overrides = {}) {
     // that error to the user (every other command still sees it unchanged).
     async function renderTabsAcrossProfiles() {
       const { profiles } = await dispatch(settings, token, deps.fetchFn, "profiles_list", {}, parsed.flags.timeout, {});
+      if (parsed.flags.json) {
+        const jsonProfiles = [];
+        for (const p of profiles) {
+          const summary = await dispatch(settings, token, deps.fetchFn, "get_tabs_summary", {}, parsed.flags.timeout, { profile: p.name });
+          jsonProfiles.push({ name: p.name, tabs: summary?.tabs ?? [] });
+        }
+        deps.stdout(`${JSON.stringify({ profiles: jsonProfiles }, null, 2)}\n`);
+        return;
+      }
       const blocks = [];
       for (const p of profiles) {
         const summary = await dispatch(settings, token, deps.fetchFn, "get_tabs_summary", {}, parsed.flags.timeout, { profile: p.name });
@@ -357,7 +372,11 @@ export async function runCli(argv, overrides = {}) {
         settings, token, deps.fetchFn, "session_bind",
         { name: parsed.flags.as, tabId: opened.tabId }, parsed.flags.timeout, envelope,
       );
-      deps.stdout(`session ${bound.name} → tab ${bound.tabId} (profile ${bound.profile})\n`);
+      deps.stdout(
+        parsed.flags.json
+          ? `${JSON.stringify(bound, null, 2)}\n`
+          : `session ${bound.name} → tab ${bound.tabId} (profile ${bound.profile})\n`,
+      );
       return 0;
     }
 
