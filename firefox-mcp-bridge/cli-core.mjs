@@ -4,8 +4,9 @@
 // stays strictly schema-shaped; agent-friendliness lives client-side.
 
 const GLOBAL_BOOL = new Set(["json", "no-autostart", "replace"]);
+const GLOBAL_VALUE = new Set(["session", "profile", "timeout", "wait-for", "wait-timeout"]);
 const BOOL_FLAGS = new Set([
-  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "ctrl", "alt", "shift", "meta",
+  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "ctrl", "alt", "shift", "meta", "foreground",
 ]);
 
 function tokenize(argv) {
@@ -17,7 +18,9 @@ function tokenize(argv) {
       positionals.push(...argv.slice(i + 1));
       break;
     }
-    if (a === "-o") {
+    if (a === "-s") {
+      flags.session = argv[++i];
+    } else if (a === "-o") {
       flags.out = argv[++i];
     } else if (a.startsWith("--")) {
       const eq = a.indexOf("=");
@@ -154,6 +157,30 @@ const BUILDERS = {
     if (flags.max != null) args.max = num(flags.max, "--max");
     return [{ tool: "get_tables", args }];
   },
+  open: (pos, flags) => {
+    if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--profile P] [--foreground]");
+    return [{ tool: "open_tab", args: { url: pos[0], active: !!flags.foreground } }];
+  },
+  sessions: () => [{ tool: "session_list", args: {} }],
+  session: (pos) => {
+    if (pos[0] === "rm" && pos[1]) return [{ tool: "session_remove", args: { name: pos[1] } }];
+    throw new UsageError("usage: ff session rm <name>");
+  },
+  bind: (pos, flags) => {
+    if (!pos[0] || flags.tab == null) throw new UsageError("usage: ff bind <name> --tab N [--profile P]");
+    return [{ tool: "session_bind", args: { name: pos[0], tabId: num(flags.tab, "--tab") } }];
+  },
+  profiles: (pos, flags) => {
+    if (pos[0] == null) return [{ tool: "profiles_list", args: {} }];
+    if (pos[0] === "name" && pos[1]) {
+      if (pos[2]) {
+        flags.profile = pos[1]; // route the rename at the OLD name
+        return [{ tool: "set_profile_name", args: { name: pos[2] } }];
+      }
+      return [{ tool: "set_profile_name", args: { name: pos[1] } }];
+    }
+    throw new UsageError("usage: ff profiles | ff profiles name [OLD] NEW");
+  },
 };
 
 for (const [name, tool] of Object.entries(POINTER_TOOLS)) {
@@ -189,21 +216,72 @@ function checkboxSteps(pos, flags, checked) {
 
 const LIFECYCLE = new Set(["status", "start", "stop", "ping"]);
 
+// Global flags are legal BEFORE the command too (`ff -s research text`).
+// Consume leading globals, then hand the remainder to the command parser;
+// tokenize() already accepts them after the command.
+function splitLeadingGlobals(argv) {
+  const globals = [];
+  let i = 0;
+  while (i < argv.length) {
+    const a = argv[i];
+    if (a === "-s") {
+      globals.push("-s", argv[i + 1]);
+      i += 2;
+      continue;
+    }
+    if (a.startsWith("--")) {
+      const key = a.slice(2).split("=")[0];
+      if (GLOBAL_BOOL.has(key)) {
+        globals.push(a);
+        i += 1;
+        continue;
+      }
+      if (GLOBAL_VALUE.has(key)) {
+        if (a.includes("=")) {
+          globals.push(a);
+          i += 1;
+        } else {
+          globals.push(a, argv[i + 1]);
+          i += 2;
+        }
+        continue;
+      }
+    }
+    break;
+  }
+  return { globals, rest: argv.slice(i) };
+}
+
 export function parseCli(argv) {
-  const [command, ...rest] = argv;
+  const { globals, rest: afterGlobals } = splitLeadingGlobals(argv);
+  const [command, ...rest] = afterGlobals;
   if (!command || command === "--help" || command === "-h" || command === "help") {
     return { ok: true, kind: "help" };
   }
-  const { flags, positionals } = tokenize(rest);
-  const global = {
-    json: !!flags.json,
-    out: flags.out,
-    noAutostart: !!flags["no-autostart"],
-    replace: !!flags.replace,
-    timeout: flags.timeout != null ? Number(flags.timeout) : undefined,
-    waitFor: flags["wait-for"],
-    waitTimeout: flags["wait-timeout"] != null ? Number(flags["wait-timeout"]) : undefined,
-  };
+  const { flags, positionals } = tokenize([...rest, ...globals]);
+
+  function buildGlobal() {
+    return {
+      json: !!flags.json,
+      out: flags.out,
+      noAutostart: !!flags["no-autostart"],
+      replace: !!flags.replace,
+      timeout: flags.timeout != null ? Number(flags.timeout) : undefined,
+      waitFor: flags["wait-for"],
+      waitTimeout: flags["wait-timeout"] != null ? Number(flags["wait-timeout"]) : undefined,
+      session: flags.session,
+      profile: flags.profile,
+      as: flags.as,
+    };
+  }
+
+  if (flags.session != null && flags.tab != null) {
+    return { ok: false, error: "-s/--session cannot be combined with --tab (the session owns its tab)" };
+  }
+  if (flags.session != null && flags.profile != null) {
+    return { ok: false, error: "-s/--session cannot be combined with --profile (the session owns its profile)" };
+  }
+  const global = buildGlobal();
   if (global.timeout != null && !Number.isFinite(global.timeout)) {
     return { ok: false, error: "--timeout must be a number of milliseconds" };
   }
@@ -214,7 +292,8 @@ export function parseCli(argv) {
   const builder = BUILDERS[command];
   if (!builder) return { ok: false, error: `unknown command: ${command} (see ff --help)` };
   try {
-    return { ok: true, kind: "steps", command, steps: builder(positionals, flags), flags: global };
+    const steps = builder(positionals, flags);
+    return { ok: true, kind: "steps", command, steps, flags: buildGlobal() };
   } catch (err) {
     if (err instanceof UsageError) return { ok: false, error: err.message };
     throw err;
@@ -245,6 +324,27 @@ export function formatResult(command, results, { json = false } = {}) {
       const links = last?.links ?? [];
       return links.map((l) => `${l.text ?? ""} — ${l.href ?? ""}`).join("\n");
     }
+    case "sessions": {
+      const sessions = last?.sessions ?? [];
+      if (!sessions.length) return "no sessions — create one with `ff open <url> --as <name>`";
+      return sessions
+        .map((s) => `${s.name}  ${s.profile}  tab ${s.tabId}  ${s.live ? "live" : "STALE"}  ${s.url ?? ""}`.trimEnd())
+        .join("\n");
+    }
+    case "profiles": {
+      if (last?.profiles) {
+        return last.profiles.length
+          ? last.profiles.map((p) => `${p.name}${p.runId == null ? "  (extension outdated: no session support)" : ""}`).join("\n")
+          : "no Firefox profiles connected";
+      }
+      return `profile named "${last?.name}"`; // set_profile_name result
+    }
+    case "open":
+      return `tab ${last?.tabId}`;
+    case "bind":
+      return `session ${last?.name} → tab ${last?.tabId} (profile ${last?.profile})`;
+    case "session":
+      return last?.removed ? "removed" : "no such session";
     default:
       return JSON.stringify(last, null, 2);
   }
@@ -256,6 +356,10 @@ export function usageText() {
 Bridge:  ff status | start [--replace] | stop | ping
 Tabs:    ff tabs                        ff tab close|activate [--tab N]
          ff nav <url> [--tab N]         ff reload [--hard] | back | forward
+         ff open <url> [--as NAME] [--foreground]
+Session: ff sessions | ff session rm NAME | ff bind NAME --tab N
+         ff -s NAME <command>           any tab command runs against the session
+Profile: ff profiles | ff profiles name [OLD] NEW | ff --profile P <command>
 Read:    ff text [--max N]              ff screenshot [-o out.png] [--jpeg [--quality N]]
          ff links [--max N]             ff tables [--max N]
          ff find <text> [--css SEL]     ff js <code> | -f <file> | -   (stdin)
@@ -267,7 +371,7 @@ Act:     ff click <query> [--css SEL] | --at X,Y     (also: hover, dblclick, rcl
          ff select <css> <value> [--by-text]         ff check|uncheck <css>
 
 <query> matches visible text/aria-label (find_element); add --css to scope.
-Global:  --tab N   --json   --timeout MS   --no-autostart
+Global:  --tab N   -s NAME   --profile P   --json   --timeout MS   --no-autostart
          --wait-for <css> [--wait-timeout MS]   poll until an element appears
 js prints string results raw; add --json for the full value as JSON.
 The bridge auto-starts on demand; logs: ~/.firefox-mcp/bridge.log`;

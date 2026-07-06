@@ -181,12 +181,76 @@ test("--wait-for and --wait-timeout parse into global flags", () => {
   assert.deepEqual(p.steps, [{ tool: "navigate", args: { url: "x.com" } }]);
 });
 
-// --- coverage: every relayed tool is reachable from the CLI ---
+// --- sessions / profiles ---
 
-// Tools not yet wired to a CLI builder. open_tab lands with `ff open` as part
-// of the sessions/multi-profile CLI work (--as/--profile/--foreground); until
-// then it's exempted here rather than given a throwaway builder.
-const CLI_PENDING = new Set(["open_tab"]);
+test("global flags parse before or after the command, -s aliases --session", () => {
+  for (const argv of [
+    ["-s", "research", "text"],
+    ["--session", "research", "text"],
+    ["text", "-s", "research"],
+    ["--session=research", "text"],
+  ]) {
+    const p = parseCli(argv);
+    assert.equal(p.ok, true, JSON.stringify(argv));
+    assert.equal(p.flags.session, "research");
+    assert.deepEqual(p.steps[0], { tool: "get_page_text", args: {} });
+  }
+  const q = parseCli(["--profile", "work", "nav", "https://x.com"]);
+  assert.equal(q.flags.profile, "work");
+});
+
+test("session conflicts are usage errors", () => {
+  assert.equal(parseCli(["text", "-s", "a", "--tab", "3"]).ok, false);
+  assert.equal(parseCli(["text", "-s", "a", "--profile", "p"]).ok, false);
+  assert.match(parseCli(["text", "-s", "a", "--tab", "3"]).error, /--tab/);
+});
+
+test("open builds open_tab; --foreground activates; --as is captured", () => {
+  const p = parseCli(["open", "https://x.com", "--as", "research", "--foreground"]);
+  assert.deepEqual(p.steps, [{ tool: "open_tab", args: { url: "https://x.com", active: true } }]);
+  assert.equal(p.flags.as, "research");
+  assert.equal(parseCli(["open"]).ok, false);
+  const bg = parseCli(["open", "https://x.com"]);
+  assert.equal(bg.steps[0].args.active, false);
+});
+
+test("sessions / session rm / bind / profiles build the pseudo-tool steps", () => {
+  assert.deepEqual(parseCli(["sessions"]).steps, [{ tool: "session_list", args: {} }]);
+  assert.deepEqual(parseCli(["session", "rm", "research"]).steps, [{ tool: "session_remove", args: { name: "research" } }]);
+  assert.equal(parseCli(["session"]).ok, false);
+  assert.deepEqual(parseCli(["bind", "research", "--tab", "42"]).steps, [{ tool: "session_bind", args: { name: "research", tabId: 42 } }]);
+  assert.equal(parseCli(["bind", "research"]).ok, false, "bind requires --tab");
+  assert.deepEqual(parseCli(["profiles"]).steps, [{ tool: "profiles_list", args: {} }]);
+});
+
+test("profiles name NEW targets the sole connection; OLD NEW routes via profile", () => {
+  const one = parseCli(["profiles", "name", "work"]);
+  assert.deepEqual(one.steps, [{ tool: "set_profile_name", args: { name: "work" } }]);
+  assert.equal(one.flags.profile, undefined);
+  const two = parseCli(["profiles", "name", "default", "work"]);
+  assert.deepEqual(two.steps, [{ tool: "set_profile_name", args: { name: "work" } }]);
+  assert.equal(two.flags.profile, "default");
+});
+
+test("formatResult renders sessions, profiles, open, and bind", () => {
+  const sessions = formatResult("sessions", [{ tool: "session_list", result: { sessions: [
+    { name: "research", profile: "work", tabId: 42, live: true, url: "https://x.com" },
+    { name: "old", profile: "work", tabId: 7, live: false, url: null },
+  ] } }], {});
+  assert.match(sessions, /research\s+work\s+tab 42\s+live\s+https:\/\/x\.com/);
+  assert.match(sessions, /old\s+work\s+tab 7\s+STALE/);
+
+  const profiles = formatResult("profiles", [{ tool: "profiles_list", result: { profiles: [{ name: "work", runId: "r", connectedAt: 1 }] } }], {});
+  assert.match(profiles, /work/);
+
+  assert.match(formatResult("open", [{ tool: "open_tab", result: { tabId: 55, windowId: 2, url: "https://x.com" } }], {}), /tab 55/);
+  assert.match(
+    formatResult("bind", [{ tool: "session_bind", result: { name: "research", profile: "work", tabId: 42, url: null, previous: null } }], {}),
+    /research.*tab 42.*work/,
+  );
+});
+
+// --- coverage: every relayed tool is reachable from the CLI ---
 
 test("every WS tool is reachable through some CLI command", () => {
   const reachable = new Set();
@@ -196,7 +260,7 @@ test("every WS tool is reachable through some CLI command", () => {
     ["tab", "close"], ["tab", "activate", "--tab", "1"], ["reload"], ["back"], ["forward"],
     ["key", "Enter"], ["scroll", "--dy", "1"], ["click", "q"], ["dblclick", "q"], ["rclick", "q"], ["hover", "q"],
     ["drag", "--from", "1,2", "--to", "3,4"], ["select", "#s", "v"], ["check", "#c"],
-    ["find", "q"], ["links"], ["tables"],
+    ["find", "q"], ["links"], ["tables"], ["open", "https://x.com"],
   ];
   for (const argv of invocations) {
     const p = parseCli(argv);
@@ -204,7 +268,6 @@ test("every WS tool is reachable through some CLI command", () => {
     for (const s of p.steps) reachable.add(s.tool);
   }
   for (const tool of WS_TOOL_NAMES) {
-    if (CLI_PENDING.has(tool)) continue;
     assert.ok(reachable.has(tool), `tool not reachable from CLI: ${tool}`);
   }
 });
