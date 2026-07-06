@@ -55,6 +55,31 @@ Targeting is by visible text (add `--css <sel>` to scope, `--at X,Y` for raw
 coordinates). `navigate`/`click` are fire-and-forget — verify with `ff text`.
 ```
 
+## Sessions & profiles
+
+Multiple agents (or one agent juggling tabs) can each pin a named session to a
+tab, so nothing ever depends on which tab you happen to be looking at:
+
+```bash
+ff open https://docs.example --as research   # background tab, never steals focus
+ff -s research text                          # every command can target the session
+ff -s research tab close                     # closes the tab and the session
+```
+
+Sessions fail safe: if Firefox restarted or the tab is gone you get
+SESSION_STALE — never a command silently running against the wrong tab.
+
+Run several Firefox profiles at once and name each one (once, per profile):
+
+```bash
+ff profiles name work        # with one profile connected
+ff --profile work nav https://mail.example
+ff tabs                      # more than one profile? tabs come grouped
+```
+
+With one profile connected, nothing changes — name flags are only needed when
+two Firefoxes are up.
+
 ## CLI reference
 
 Run `ff --help` for the one-screen version. Highlights:
