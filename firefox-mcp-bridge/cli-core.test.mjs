@@ -205,6 +205,26 @@ test("session conflicts are usage errors", () => {
   assert.match(parseCli(["text", "-s", "a", "--tab", "3"]).error, /--tab/);
 });
 
+test("-s/--session/--profile with no following value is a usage error, in leading and trailing position", () => {
+  for (const argv of [["-s"], ["--session"], ["--profile"]]) {
+    const p = parseCli(argv);
+    assert.equal(p.ok, false, JSON.stringify(argv));
+    assert.match(p.error, /missing value for/);
+  }
+  assert.match(parseCli(["-s"]).error, /-s\/--session/);
+  assert.match(parseCli(["--session"]).error, /-s\/--session/);
+  assert.match(parseCli(["--profile"]).error, /--profile/);
+
+  for (const argv of [["text", "-s"], ["text", "--session"], ["text", "--profile"]]) {
+    const p = parseCli(argv);
+    assert.equal(p.ok, false, JSON.stringify(argv));
+    assert.match(p.error, /missing value for/);
+  }
+  assert.match(parseCli(["text", "-s"]).error, /-s\/--session/);
+  assert.match(parseCli(["text", "--session"]).error, /-s\/--session/);
+  assert.match(parseCli(["text", "--profile"]).error, /--profile/);
+});
+
 test("open builds open_tab; --foreground activates; --as is captured", () => {
   const p = parseCli(["open", "https://x.com", "--as", "research", "--foreground"]);
   assert.deepEqual(p.steps, [{ tool: "open_tab", args: { url: "https://x.com", active: true } }]);
@@ -277,7 +297,8 @@ test("usageText is one screen and mentions every command", () => {
   assert.ok(u.split("\n").length <= 45, "help must stay one screen");
   for (const cmd of ["tabs", "nav", "text", "screenshot", "click", "type", "key", "scroll", "drag",
                      "select", "check", "uncheck", "find", "links", "tables", "js", "tab", "reload",
-                     "back", "forward", "status", "start", "stop", "ping"]) {
+                     "back", "forward", "status", "start", "stop", "ping",
+                     "open", "sessions", "session", "bind", "profiles"]) {
     assert.ok(u.includes(cmd), `usage missing: ${cmd}`);
   }
 });

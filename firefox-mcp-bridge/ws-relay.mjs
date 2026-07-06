@@ -101,6 +101,10 @@ export function createRelay({
     if (!info || ws.readyState !== WebSocket.OPEN) return;
     clearTimeout(info.graceTimer);
     const raw = helloMsg?.profileName;
+    // A hello with an explicit profileName: "default" (e.g. after `ff profiles
+    // name X default`) intentionally lands in the same bucket as a hello-less
+    // legacy connection — "default" is the shared fallback name either way, so
+    // no special-casing is needed here to tell the two apart.
     const name = typeof raw === "string" && PROFILE_NAME_RE.test(raw) ? raw : "default";
     if (info.profile && connections.get(info.profile) === ws) connections.delete(info.profile);
     const incumbent = connections.get(name);

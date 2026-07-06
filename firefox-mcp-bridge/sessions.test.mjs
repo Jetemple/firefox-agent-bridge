@@ -73,6 +73,13 @@ test("load drops corrupt JSON and malformed records, logging both", () => {
   assert.match(logs[0], /malformed session "bad"/);
 });
 
+test("bind keys the store by the coerced string name, not the raw value", () => {
+  const store = createSessionStore({ filePath: null });
+  store.bind(42, REC); // a non-string name is coerced for both validation and storage
+  assert.equal(store.get("42")?.tabId, REC.tabId, "get() with the string form must find a bind() called with a number");
+  assert.deepEqual(store.list().map((r) => r.name), ["42"], "list() must report the coerced string name");
+});
+
 test("bind rejects invalid session names with BAD_NAME", () => {
   const store = createSessionStore({ filePath: null });
   for (const bad of ["", "-x", "UPPER", "a".repeat(33), "sp ace"]) {

@@ -58,13 +58,14 @@ export function createSessionStore({ filePath, log = () => {} } = {}) {
   }
 
   function bind(name, { profile, tabId, runId, url }) {
-    if (!SESSION_NAME_RE.test(String(name ?? ""))) {
+    const key = String(name ?? "");
+    if (!SESSION_NAME_RE.test(key)) {
       throw { code: "BAD_NAME", message: `session name must match ${SESSION_NAME_RE}` };
     }
-    const previous = records.get(name) ?? null;
-    records.set(name, { profile, tabId, runId, url: url ?? null, createdAt: Date.now() });
+    const previous = records.get(key) ?? null;
+    records.set(key, { profile, tabId, runId, url: url ?? null, createdAt: Date.now() });
     persist();
-    return previous ? { name, ...previous } : null;
+    return previous ? { name: key, ...previous } : null;
   }
 
   const get = (name) => {

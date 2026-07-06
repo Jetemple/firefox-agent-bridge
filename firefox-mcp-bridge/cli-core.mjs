@@ -19,6 +19,7 @@ function tokenize(argv) {
       break;
     }
     if (a === "-s") {
+      if (argv[i + 1] === undefined) throw new UsageError("missing value for -s/--session");
       flags.session = argv[++i];
     } else if (a === "-o") {
       flags.out = argv[++i];
@@ -28,8 +29,14 @@ function tokenize(argv) {
         flags[a.slice(2, eq)] = a.slice(eq + 1);
       } else {
         const key = a.slice(2);
-        if (BOOL_FLAGS.has(key)) flags[key] = true;
-        else flags[key] = argv[++i];
+        if (BOOL_FLAGS.has(key)) {
+          flags[key] = true;
+        } else {
+          if ((key === "session" || key === "profile") && argv[i + 1] === undefined) {
+            throw new UsageError(`missing value for ${key === "session" ? "-s/--session" : "--profile"}`);
+          }
+          flags[key] = argv[++i];
+        }
       }
     } else {
       positionals.push(a);
@@ -225,6 +232,7 @@ function splitLeadingGlobals(argv) {
   while (i < argv.length) {
     const a = argv[i];
     if (a === "-s") {
+      if (argv[i + 1] === undefined) throw new UsageError("missing value for -s/--session");
       globals.push("-s", argv[i + 1]);
       i += 2;
       continue;
@@ -241,6 +249,9 @@ function splitLeadingGlobals(argv) {
           globals.push(a);
           i += 1;
         } else {
+          if ((key === "session" || key === "profile") && argv[i + 1] === undefined) {
+            throw new UsageError(`missing value for ${key === "session" ? "-s/--session" : "--profile"}`);
+          }
           globals.push(a, argv[i + 1]);
           i += 2;
         }
@@ -253,46 +264,53 @@ function splitLeadingGlobals(argv) {
 }
 
 export function parseCli(argv) {
-  const { globals, rest: afterGlobals } = splitLeadingGlobals(argv);
-  const [command, ...rest] = afterGlobals;
-  if (!command || command === "--help" || command === "-h" || command === "help") {
-    return { ok: true, kind: "help" };
-  }
-  const { flags, positionals } = tokenize([...rest, ...globals]);
-
-  function buildGlobal() {
-    return {
-      json: !!flags.json,
-      out: flags.out,
-      noAutostart: !!flags["no-autostart"],
-      replace: !!flags.replace,
-      timeout: flags.timeout != null ? Number(flags.timeout) : undefined,
-      waitFor: flags["wait-for"],
-      waitTimeout: flags["wait-timeout"] != null ? Number(flags["wait-timeout"]) : undefined,
-      session: flags.session,
-      profile: flags.profile,
-      as: flags.as,
-    };
-  }
-
-  if (flags.session != null && flags.tab != null) {
-    return { ok: false, error: "-s/--session cannot be combined with --tab (the session owns its tab)" };
-  }
-  if (flags.session != null && flags.profile != null) {
-    return { ok: false, error: "-s/--session cannot be combined with --profile (the session owns its profile)" };
-  }
-  const global = buildGlobal();
-  if (global.timeout != null && !Number.isFinite(global.timeout)) {
-    return { ok: false, error: "--timeout must be a number of milliseconds" };
-  }
-  if (global.waitTimeout != null && !Number.isFinite(global.waitTimeout)) {
-    return { ok: false, error: "--wait-timeout must be a number of milliseconds" };
-  }
-  if (LIFECYCLE.has(command)) return { ok: true, kind: "lifecycle", command, flags: global };
-  const builder = BUILDERS[command];
-  if (!builder) return { ok: false, error: `unknown command: ${command} (see ff --help)` };
+  // Wrapped in one try/catch: splitLeadingGlobals and tokenize can now throw
+  // UsageError too (missing value for -s/--session/--profile), not just the
+  // command builders below — all three funnel through the same conversion.
   try {
+    const { globals, rest: afterGlobals } = splitLeadingGlobals(argv);
+    const [command, ...rest] = afterGlobals;
+    if (!command || command === "--help" || command === "-h" || command === "help") {
+      return { ok: true, kind: "help" };
+    }
+    const { flags, positionals } = tokenize([...rest, ...globals]);
+
+    function buildGlobal() {
+      return {
+        json: !!flags.json,
+        out: flags.out,
+        noAutostart: !!flags["no-autostart"],
+        replace: !!flags.replace,
+        timeout: flags.timeout != null ? Number(flags.timeout) : undefined,
+        waitFor: flags["wait-for"],
+        waitTimeout: flags["wait-timeout"] != null ? Number(flags["wait-timeout"]) : undefined,
+        session: flags.session,
+        profile: flags.profile,
+        as: flags.as,
+      };
+    }
+
+    if (flags.session != null && flags.tab != null) {
+      return { ok: false, error: "-s/--session cannot be combined with --tab (the session owns its tab)" };
+    }
+    if (flags.session != null && flags.profile != null) {
+      return { ok: false, error: "-s/--session cannot be combined with --profile (the session owns its profile)" };
+    }
+    const global = buildGlobal();
+    if (global.timeout != null && !Number.isFinite(global.timeout)) {
+      return { ok: false, error: "--timeout must be a number of milliseconds" };
+    }
+    if (global.waitTimeout != null && !Number.isFinite(global.waitTimeout)) {
+      return { ok: false, error: "--wait-timeout must be a number of milliseconds" };
+    }
+    if (LIFECYCLE.has(command)) return { ok: true, kind: "lifecycle", command, flags: global };
+    const builder = BUILDERS[command];
+    if (!builder) return { ok: false, error: `unknown command: ${command} (see ff --help)` };
     const steps = builder(positionals, flags);
+    // Re-read flags into a fresh global envelope: some builders (e.g. `profiles
+    // name OLD NEW`) inject flags.profile as a side effect to route the call at
+    // the OLD name — reusing the earlier `global` here would drop that and
+    // break rename routing.
     return { ok: true, kind: "steps", command, steps, flags: buildGlobal() };
   } catch (err) {
     if (err instanceof UsageError) return { ok: false, error: err.message };
