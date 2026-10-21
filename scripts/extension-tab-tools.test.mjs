@@ -20,6 +20,7 @@ const TAB_FILES = [
   "tools/back.js",
   "tools/forward.js",
   "tools/tabs-summary.js",
+  "tools/screenshot.js",
 ];
 
 // Handlers run inside a vm sandbox, so objects they create live in another realm
@@ -104,6 +105,43 @@ test("get_tabs_summary strips the agent marker so agents read clean titles", asy
   // Other fields pass through untouched.
   assert.equal(res.tabs[0].id, 1);
   assert.equal(res.tabs[0].url, "https://x.com");
+});
+
+test("get_tabs_summary flags only the agent tab with agent: true", async () => {
+  const FF = loadTabTools({
+    tabs: {
+      query: async () => [
+        { id: 3, url: "https://a.com", title: "A", active: true, pinned: false, windowId: 1 },
+        { id: 12, url: "https://b.com", title: "B", active: false, pinned: false, windowId: 1 },
+      ],
+    },
+  });
+  FF.agentTabId = 12;
+  const res = await FF.tools.get_tabs_summary();
+  assert.equal("agent" in res.tabs[0], false);
+  assert.equal(res.tabs[1].agent, true);
+});
+
+test("screenshot captures a background tab in place — no tab activation, no window focus", async () => {
+  const captured = [];
+  const FF = loadTabTools({
+    tabs: {
+      captureTab: async (id, opts) => (captured.push([id, opts]), "data:image/png;base64,AA=="),
+      update: async () => {
+        throw new Error("must not activate the tab");
+      },
+    },
+    windows: {
+      update: async () => {
+        throw new Error("must not focus the window");
+      },
+    },
+  });
+  FF.inject = async () => ({ w: 800, h: 600 });
+  const res = await FF.tools.screenshot({ tabId: 12, format: "jpeg", quality: 50 }, { id: 12, active: false, windowId: 1 });
+  assert.deepEqual(j(captured), [[12, { format: "jpeg", quality: 50 }]]);
+  assert.equal(res.dataUrl, "data:image/png;base64,AA==");
+  assert.equal(res.width, 800);
 });
 
 test("back and forward drive tabs.goBack / tabs.goForward", async () => {

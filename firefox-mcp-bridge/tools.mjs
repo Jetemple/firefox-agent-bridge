@@ -10,7 +10,10 @@ import { SESSION_NAME_RE } from "./sessions.mjs";
 // ping_firefox is answered bridge-locally; the other 7 are dispatched to the
 // Firefox extension over the WebSocket relay (see WS_TOOL_NAMES).
 
-const tabId = z.number().describe("Optional: tab ID. Defaults to the active tab.").optional();
+const tabId = z
+  .number()
+  .describe("Optional: tab ID. Defaults to the agent tab (the one navigate drives); the active tab before the first navigate.")
+  .optional();
 
 export const TOOLS = [
   {
@@ -22,18 +25,18 @@ export const TOOLS = [
   {
     name: "get_tabs_summary",
     description:
-      "Returns a summary of all open browser tabs (id, url, title, active, pinned, windowId).",
+      "Returns a summary of all open browser tabs (id, url, title, active, pinned, windowId; agent: true marks the agent tab).",
     inputSchema: undefined,
   },
   {
     name: "navigate",
     description:
-      "Navigate an existing tab to a URL or open a new one. Specify tabId to reuse an existing tab; omit to open a new tab.",
+      "Load a URL without switching the user's view. Omit tabId to drive the agent tab (reused across calls; opened in the background if needed); specify tabId to navigate that tab.",
     inputSchema: {
       url: z.string().describe("URL to navigate to (with or without protocol)"),
       tabId: z
         .number()
-        .describe("Optional: ID of existing tab to navigate. If omitted, opens a new tab.")
+        .describe("Optional: ID of an existing tab to navigate. If omitted, uses the agent tab.")
         .optional(),
     },
   },
@@ -57,7 +60,7 @@ export const TOOLS = [
   {
     name: "screenshot",
     description:
-      "Capture a screenshot of a tab's visible viewport. Returns a PNG/JPEG image. Note: passing tabId activates and focuses that tab before capture.",
+      "Capture a screenshot of a tab's visible viewport. Returns a PNG/JPEG image. Works on background tabs without switching to them.",
     inputSchema: {
       tabId,
       format: z.enum(["png", "jpeg"]).describe("Image format. Default: png.").optional(),
@@ -120,17 +123,17 @@ export const TOOLS = [
   },
   {
     name: "close_tab",
-    description: "Close a tab. Specify tabId; omit to close the active tab.",
+    description: "Close a tab. Omit tabId to close the agent tab.",
     inputSchema: { tabId },
   },
   {
     name: "activate_tab",
-    description: "Bring a tab to the foreground (activate it and focus its window).",
+    description: "Bring a tab to the foreground (activate it and focus its window). The only tool that changes what the user sees; omit tabId to show the agent tab.",
     inputSchema: { tabId },
   },
   {
     name: "reload",
-    description: "Reload a tab. Omit tabId to reload the active tab.",
+    description: "Reload a tab. Omit tabId for the agent tab.",
     inputSchema: {
       tabId,
       bypassCache: z
@@ -141,12 +144,12 @@ export const TOOLS = [
   },
   {
     name: "back",
-    description: "Navigate a tab back in its session history. Omit tabId for the active tab.",
+    description: "Navigate a tab back in its session history. Omit tabId for the agent tab.",
     inputSchema: { tabId },
   },
   {
     name: "forward",
-    description: "Navigate a tab forward in its session history. Omit tabId for the active tab.",
+    description: "Navigate a tab forward in its session history. Omit tabId for the agent tab.",
     inputSchema: { tabId },
   },
   {

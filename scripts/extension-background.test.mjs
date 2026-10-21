@@ -350,3 +350,123 @@ test("pageStamp (in-page) stamps, is idempotent, and re-stamps a page-changed ti
   // pageStamp's write matches buildTitle exactly — no format drift.
   assert.equal(ctx.sandbox.document.title, ctx.FF.buildTitle("New Route", "airbnb"));
 });
+
+// --- agent tab ---------------------------------------------------------------
+
+test("resolveTab prefers the agent tab over the active tab once it exists", async () => {
+  const agent = { id: 12, active: false };
+  const { FF } = loadBackground({
+    tabs: {
+      get: async (id) => {
+        assert.equal(id, 12);
+        return agent;
+      },
+      query: async () => {
+        throw new Error("must not fall back to the active tab");
+      },
+    },
+  });
+  FF.agentTabId = 12;
+  assert.equal(await FF.resolveTab(undefined), agent);
+});
+
+test("resolveTab throws when the agent tab was closed — never the active tab", async () => {
+  let queried = false;
+  const { FF } = loadBackground({
+    tabs: {
+      get: async () => {
+        throw new Error("Invalid tab ID: 12");
+      },
+      query: async () => {
+        queried = true;
+        return [{ id: 3, active: true }];
+      },
+    },
+  });
+  FF.agentTabId = 12;
+  await assert.rejects(FF.resolveTab(undefined), (err) => {
+    assert.equal(err.code, "TAB_NOT_FOUND");
+    assert.match(err.message, /agent tab was closed/);
+    return true;
+  });
+  assert.equal(queried, false, "a closed agent tab must not redirect into the user's tab");
+});
+
+test('resolveTab("active") returns the viewed tab even when an agent tab exists', async () => {
+  const active = { id: 3, active: true };
+  const { FF } = loadBackground({
+    tabs: {
+      get: async () => {
+        throw new Error("should not look up the agent tab");
+      },
+      query: async () => [active],
+    },
+  });
+  FF.agentTabId = 12;
+  assert.equal(await FF.resolveTab("active"), active);
+});
+
+test("navigate with no tabId opens a background agent tab and marks it", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    tabs: { create: async (opts) => (created.push(opts), { id: 12, windowId: 1 }) },
+  });
+  const result = await FF.tools.navigate({ url: "example.com" });
+  assert.equal(created.length, 1);
+  assert.equal(created[0].active, false, "must not switch the user's view");
+  assert.equal(created[0].url, "https://example.com");
+  assert.equal(result.tabId, 12);
+  assert.equal(FF.agentTabId, 12);
+  assert.equal(FF.markedTabs.get(12), null);
+});
+
+test("navigate reuses the agent tab in place, without activating it", async () => {
+  const updates = [];
+  const { FF } = loadWithTools({
+    tabs: {
+      create: async () => {
+        throw new Error("must reuse the agent tab");
+      },
+      update: async (id, props) => (updates.push([id, props]), { id }),
+    },
+  });
+  FF.agentTabId = 12;
+  const result = await FF.tools.navigate({ url: "https://other.com" });
+  assert.equal(result.tabId, 12);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0][0], 12);
+  assert.equal(updates[0][1].url, "https://other.com");
+  assert.equal(updates[0][1].active, undefined, "update must not activate");
+});
+
+test("navigate opens a fresh agent tab when the old one was closed", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    tabs: {
+      update: async () => {
+        throw new Error("Invalid tab ID: 12");
+      },
+      create: async (opts) => (created.push(opts), { id: 13, windowId: 1 }),
+    },
+  });
+  FF.agentTabId = 12;
+  const result = await FF.tools.navigate({ url: "example.com" });
+  assert.equal(result.tabId, 13);
+  assert.equal(created[0].active, false);
+  assert.equal(FF.agentTabId, 13);
+});
+
+test('navigate with tabId "active" loads the viewed tab and leaves the agent tab alone', async () => {
+  const updates = [];
+  const { FF } = loadWithTools({
+    tabs: {
+      query: async () => [{ id: 3, active: true }],
+      update: async (id, props) => (updates.push([id, props]), { id }),
+    },
+  });
+  FF.agentTabId = 12;
+  const result = await FF.tools.navigate({ url: "example.com", tabId: "active" });
+  assert.equal(result.tabId, 3);
+  assert.equal(updates[0][0], 3);
+  assert.equal(FF.agentTabId, 12);
+});

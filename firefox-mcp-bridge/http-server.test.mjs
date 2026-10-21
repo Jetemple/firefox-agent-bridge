@@ -157,6 +157,14 @@ test("validateDispatchBody rejects args failing the tool's schema", () => {
   assert.equal(validateDispatchBody({ tool: "navigate", args: {} }).ok, false);
 });
 
+test('validateDispatchBody accepts tabId "active" (ff --here) and rejects other strings', () => {
+  const r = validateDispatchBody({ tool: "get_page_text", args: { tabId: "active" } });
+  assert.equal(r.ok, true);
+  assert.equal(r.args.tabId, "active");
+  assert.equal(validateDispatchBody({ tool: "get_page_text", args: { tabId: "mine" } }).ok, false);
+  assert.equal(validateDispatchBody({ tool: "get_page_text", args: { tabId: "active" }, session: "s" }).ok, false);
+});
+
 test("validateDispatchBody passes open_tab's marker label through (ff open --as)", () => {
   const r = validateDispatchBody({ tool: "open_tab", args: { url: "x.com", active: false, label: "research" } });
   assert.equal(r.ok, true);

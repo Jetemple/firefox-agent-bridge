@@ -162,9 +162,19 @@ async function resolveTab(tabId) {
       throw bridgeError("TAB_NOT_FOUND", `Tab ${tabId} not found — call get_tabs_summary for fresh ids`);
     }
   }
-  const [active] = await browser.tabs.query({ active: true, currentWindow: true });
-  if (!active) throw bridgeError("TAB_NOT_FOUND", "No active tab");
-  return active;
+  if (FF.agentTabId != null) {
+    try {
+      return await browser.tabs.get(FF.agentTabId);
+    } catch {
+      // Same rule as a stale explicit id: once the agent has a tab, its closing
+      // must not redirect clicks/typing into the user's tab.
+      throw bridgeError(
+        "TAB_NOT_FOUND",
+        'The agent tab was closed — navigate to open a new one, or pass tabId "active" (ff --here) for the tab the user is viewing',
+      );
+    }
+  }
+  return activeTab();
 }
 FF.resolveTab = resolveTab;
 

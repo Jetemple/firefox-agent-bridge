@@ -15,6 +15,8 @@
         active: t.active,
         pinned: t.pinned,
         windowId: t.windowId,
+        // Only on the agent tab, to keep the common case's payload unchanged.
+        ...(t.id === FF.agentTabId ? { agent: true } : {}),
       })),
     };
   };

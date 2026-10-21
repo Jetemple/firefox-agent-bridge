@@ -53,7 +53,19 @@ Act:  `ff nav <url>`, `ff click <visible text>`, `ff type <field label> <text>`,
       `ff key Enter`, `ff scroll --dy 600`, `ff js <code>`
 Targeting is by visible text (add `--css <sel>` to scope, `--at X,Y` for raw
 coordinates). `navigate`/`click` are fire-and-forget — verify with `ff text`.
+Commands run in your own background tab (🤖), never the one I'm viewing; use
+`--here` only when I ask about the page I'm on.
 ```
+
+### The agent tab
+
+`ff` never switches the tab you're looking at or raises a Firefox window.
+`ff nav <url>` opens a background tab the first time (stamped 🤖 in the tab
+strip) and reuses it after that; `ff text`, `ff click`, `ff screenshot` and
+the rest act on it by default. `--here` targets the tab you're viewing instead,
+and `ff tab activate` brings the agent tab into view when you want to watch.
+If you close the agent tab, commands error until the next `ff nav` rather than
+falling through to your tab.
 
 ## Sessions & profiles
 
