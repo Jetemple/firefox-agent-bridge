@@ -13,11 +13,15 @@ const EXT = resolve(dirname(fileURLToPath(import.meta.url)), "../firefox-extensi
 
 const TAB_FILES = [
   "restricted.js",
+  "marker.js",
   "tools/close-tab.js",
   "tools/activate-tab.js",
   "tools/reload.js",
   "tools/back.js",
   "tools/forward.js",
+  "tools/tabs-summary.js",
+  "tools/screenshot.js",
+  "tools/find-element.js",
 ];
 
 // Handlers run inside a vm sandbox, so objects they create live in another realm
@@ -82,6 +86,73 @@ test("reload reloads the tab, passing bypassCache through", async () => {
     [3, { bypassCache: true }],
     [3, { bypassCache: false }],
   ]);
+});
+
+test("get_tabs_summary strips the agent marker so agents read clean titles", async () => {
+  const FF = loadTabTools({
+    tabs: {
+      query: async () => [
+        { id: 1, url: "https://x.com", title: "🤖 airbnb · Airbnb — Rentals", active: true, pinned: false, windowId: 1 },
+        { id: 2, url: "https://y.com", title: "🤖 Plain agent tab", active: false, pinned: false, windowId: 1 },
+        { id: 3, url: "https://z.com", title: "Untouched user tab", active: false, pinned: false, windowId: 1 },
+      ],
+    },
+  });
+  const res = await FF.tools.get_tabs_summary();
+  assert.deepEqual(
+    res.tabs.map((t) => t.title),
+    ["Airbnb — Rentals", "Plain agent tab", "Untouched user tab"],
+  );
+  // Other fields pass through untouched.
+  assert.equal(res.tabs[0].id, 1);
+  assert.equal(res.tabs[0].url, "https://x.com");
+});
+
+test("get_tabs_summary flags only the agent tab with agent: true", async () => {
+  const FF = loadTabTools({
+    tabs: {
+      query: async () => [
+        { id: 3, url: "https://a.com", title: "A", active: true, pinned: false, windowId: 1 },
+        { id: 12, url: "https://b.com", title: "B", active: false, pinned: false, windowId: 1 },
+      ],
+    },
+  });
+  FF.agentTabId = 12;
+  const res = await FF.tools.get_tabs_summary();
+  assert.equal("agent" in res.tabs[0], false);
+  assert.equal(res.tabs[1].agent, true);
+});
+
+test("screenshot captures a background tab in place — no tab activation, no window focus", async () => {
+  const captured = [];
+  const FF = loadTabTools({
+    tabs: {
+      captureTab: async (id, opts) => (captured.push([id, opts]), "data:image/png;base64,AA=="),
+      update: async () => {
+        throw new Error("must not activate the tab");
+      },
+    },
+    windows: {
+      update: async () => {
+        throw new Error("must not focus the window");
+      },
+    },
+  });
+  FF.inject = async () => ({ w: 800, h: 600 });
+  const res = await FF.tools.screenshot({ tabId: 12, format: "jpeg", quality: 50 }, { id: 12, active: false, windowId: 1 });
+  assert.deepEqual(j(captured), [[12, { format: "jpeg", quality: 50 }]]);
+  assert.equal(res.dataUrl, "data:image/png;base64,AA==");
+  assert.equal(res.width, 800);
+});
+
+test("find_element rejects a call with neither text nor selector", async () => {
+  const FF = loadTabTools({});
+  FF.inject = async () => {
+    throw new Error("must not inject");
+  };
+  for (const args of [{}, { text: "" }, { selector: "" }]) {
+    await assert.rejects(FF.tools.find_element(args, { id: 1 }), (err) => err.code === "INVALID_ARGS");
+  }
 });
 
 test("back and forward drive tabs.goBack / tabs.goForward", async () => {

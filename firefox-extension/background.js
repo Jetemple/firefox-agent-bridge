@@ -1,4 +1,4 @@
-// WebSocket client + tool dispatcher for the Claude Firefox Bridge.
+// WebSocket client + tool dispatcher for the Agent Bridge for Firefox.
 //
 // Connects to the owned MCP bridge on ws://127.0.0.1:3002, receives
 // {id, tool, args} requests, executes them with browser.* APIs, and replies
@@ -96,9 +96,63 @@ FF.inject = async function inject(tabId, func, args = [], world) {
   return first.result;
 };
 
+// --- tab marker ----------------------------------------------------------
+
+// Injected into the page: strip any existing marker, then prepend the fresh
+// prefix. Self-contained — runs in page scope with no access to FF, so the
+// format is passed in as pre-computed strings from marker.js (single source of
+// truth). The `!==` guard makes the write a no-op when already stamped, so the
+// onUpdated event it triggers doesn't loop.
+FF.pageStamp = function pageStamp(regexSource, prefix) {
+  const bare = (document.title || "").replace(new RegExp(regexSource), "");
+  const next = prefix + bare;
+  if (document.title !== next) document.title = next;
+};
+
+// Re-apply the stamp whenever a marked tab finishes loading or changes its
+// title (SPA route changes, late document.title writes). Restricted / unknown
+// URLs are skipped (isRestricted(undefined) === true) — a later event with a
+// real URL restamps. Injection failures are swallowed: a transient about:blank
+// mid-load resolves on the next event.
+FF.onTabUpdated = async function onTabUpdated(tabId, changeInfo, tab) {
+  if (!FF.markedTabs.has(tabId)) return;
+  if (changeInfo.title === undefined && changeInfo.status !== "complete") return;
+  if (FF.isRestricted(tab && tab.url)) return;
+  const label = FF.markedTabs.get(tabId);
+  try {
+    await FF.inject(tabId, FF.pageStamp, [FF.markerRegexSource(), FF.markerPrefix(label)]);
+  } catch {
+    /* transient (tab still loading, gone) — next onUpdated retries */
+  }
+};
+
+FF.onTabRemoved = function onTabRemoved(tabId) {
+  FF.markedTabs.delete(tabId);
+};
+
+// `?.` so test sandboxes that stub browser.tabs without event hubs still load.
+browser.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => FF.onTabUpdated(tabId, changeInfo, tab));
+browser.tabs.onRemoved?.addListener((tabId) => FF.onTabRemoved(tabId));
+
 // --- tab resolution + dispatch -------------------------------------------
 
+// The agent's own tab: what `navigate` drives when no tabId is given, and what
+// every un-targeted tool acts on, so an agent works in a background tab instead
+// of whatever the user is looking at. In-memory (persistent background page);
+// an extension reload or Firefox restart forgets it. Deliberately NOT cleared
+// when the tab closes — see resolveTab.
+FF.agentTabId ??= null;
+
+async function activeTab() {
+  const [active] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!active) throw bridgeError("TAB_NOT_FOUND", "No active tab");
+  return active;
+}
+
+// tabId: a number (explicit), "active" (the tab the user is viewing), or
+// omitted (the agent tab; the active tab only before the first navigate).
 async function resolveTab(tabId) {
+  if (tabId === "active") return activeTab();
   if (tabId != null) {
     try {
       return await browser.tabs.get(tabId);
@@ -108,9 +162,19 @@ async function resolveTab(tabId) {
       throw bridgeError("TAB_NOT_FOUND", `Tab ${tabId} not found — call get_tabs_summary for fresh ids`);
     }
   }
-  const [active] = await browser.tabs.query({ active: true, currentWindow: true });
-  if (!active) throw bridgeError("TAB_NOT_FOUND", "No active tab");
-  return active;
+  if (FF.agentTabId != null) {
+    try {
+      return await browser.tabs.get(FF.agentTabId);
+    } catch {
+      // Same rule as a stale explicit id: once the agent has a tab, its closing
+      // must not redirect clicks/typing into the user's tab.
+      throw bridgeError(
+        "TAB_NOT_FOUND",
+        'The agent tab was closed — navigate to open a new one, or pass tabId "active" (ff --here) for the tab the user is viewing',
+      );
+    }
+  }
+  return activeTab();
 }
 FF.resolveTab = resolveTab;
 
@@ -211,8 +275,9 @@ function connect() {
     return;
   }
 
-  // Regression guard: default MV3 CSP would upgrade ws:// to wss:// via
-  // upgrade-insecure-requests. The manifest drops that directive; verify it.
+  // Regression guard: an upgrade-insecure-requests CSP directive would turn
+  // ws:// into wss://, which the plain-ws bridge can't accept. The manifest CSP
+  // must not carry it; verify.
   if (!ws.url.startsWith("ws://")) {
     setStatus({
       state: "error",
@@ -263,9 +328,8 @@ browser.runtime.onMessage.addListener((message) => {
   return undefined;
 });
 
-// Keepalive: Firefox MV3 non-persistent event pages suspend after idle,
-// dropping the socket. A periodic alarm reliably wakes the page and
-// reconnects if the socket is down.
+// Keepalive: a safety net behind scheduleReconnect — if the socket is down for
+// any reason, the alarm retries connect() (a no-op while connected).
 const KEEPALIVE_ALARM = "ff-bridge-keepalive";
 browser.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.25 });
 browser.alarms.onAlarm.addListener((alarm) => {

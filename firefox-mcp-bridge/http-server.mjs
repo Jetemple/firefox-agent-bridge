@@ -19,10 +19,16 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 // WS_TOOL_NAMES (tools.mjs) so this allowlist and the CLI parity test share
 // one source of truth instead of duplicating the filter.
 const WS_TOOLS = new Set(WS_TOOL_NAMES);
+// /dispatch also accepts tabId "active" (`ff --here`: the tab the user is
+// viewing). It stays out of the MCP schema so the tool list costs no more
+// tokens; MCP clients pass the numeric id from get_tabs_summary instead.
+const DISPATCH_TAB_ID = z.union([z.number(), z.literal("active")]).optional();
 const DISPATCH_SCHEMAS = new Map(
   TOOLS.filter((t) => WS_TOOLS.has(t.name)).map((t) => [
     t.name,
-    t.inputSchema ? z.object(t.inputSchema) : z.object({}),
+    !t.inputSchema
+      ? z.object({}).strict()
+      : z.object("tabId" in t.inputSchema ? { ...t.inputSchema, tabId: DISPATCH_TAB_ID } : t.inputSchema).strict(),
   ]),
 );
 

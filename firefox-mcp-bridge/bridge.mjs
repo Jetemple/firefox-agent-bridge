@@ -1,11 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import { TOOLS } from "./tools.mjs";
 import { toCallToolResult, toErrorResult } from "./result.mjs";
 
 export const SERVER_NAME = "firefox-bridge";
 export const SERVER_VERSION = "0.1.0";
 
-// createBridge wires the 8 tools onto an McpServer. It does not own a transport
+// createBridge wires the tools onto an McpServer. It does not own a transport
 // — index.mjs connects it to StdioServerTransport; tests connect it to an
 // InMemoryTransport. `relay` provides clientCount() and dispatch(tool, args).
 export function createBridge({
@@ -55,7 +56,8 @@ export function createBridge({
 
   for (const tool of TOOLS) {
     const opts = { description: tool.description };
-    if (tool.inputSchema) opts.inputSchema = tool.inputSchema;
+    // strict: the advertised additionalProperties:false is actually enforced.
+    if (tool.inputSchema) opts.inputSchema = z.object(tool.inputSchema).strict();
 
     let handler;
     if (tool.name === "ping_firefox") {

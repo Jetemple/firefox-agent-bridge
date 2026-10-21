@@ -53,7 +53,19 @@ Act:  `ff nav <url>`, `ff click <visible text>`, `ff type <field label> <text>`,
       `ff key Enter`, `ff scroll --dy 600`, `ff js <code>`
 Targeting is by visible text (add `--css <sel>` to scope, `--at X,Y` for raw
 coordinates). `navigate`/`click` are fire-and-forget — verify with `ff text`.
+Commands run in your own background tab (🤖), never the one I'm viewing; use
+`--here` only when I ask about the page I'm on.
 ```
+
+### The agent tab
+
+`ff` never switches the tab you're looking at or raises a Firefox window.
+`ff nav <url>` opens a background tab the first time (stamped 🤖 in the tab
+strip) and reuses it after that; `ff text`, `ff click`, `ff screenshot` and
+the rest act on it by default. `--here` targets the tab you're viewing instead,
+and `ff tab activate` brings the agent tab into view when you want to watch.
+If you close the agent tab, commands error until the next `ff nav` rather than
+falling through to your tab.
 
 ## Sessions & profiles
 
@@ -184,14 +196,29 @@ anything reaches Firefox. `/health` exposes only name/version/pid/startedAt/conn
 
 ## Status & caveats
 
-- The extension currently loads as a **temporary** add-on, so it drops when Firefox
-  restarts and must be re-loaded from `about:debugging`. A signed/permanent package is
-  not done yet.
+- A **temporary** add-on drops when Firefox restarts. For a permanent install, sign
+  your own copy (see *Permanent install* below).
 - `navigate` and `click` are **fire-and-forget** — they return when the action is
   initiated, without waiting for the page to finish loading or settling. Add your own
   read-back (e.g. `get_page_text`) when you need to be sure a step landed.
 - Mouse and keyboard tools dispatch synthetic DOM events: they drive page handlers, not
   native browser chrome.
+
+## Permanent install
+
+Release Firefox only installs signed extensions. Mozilla signs unlisted (self-distributed)
+add-ons automatically, usually within minutes:
+
+1. Get API credentials at <https://addons.mozilla.org/developers/addon/api/key/> and
+   export them as `WEB_EXT_API_KEY` (the JWT issuer) and `WEB_EXT_API_SECRET`.
+2. If you forked this repo, change `browser_specific_settings.gecko.id` in
+   `firefox-extension/manifest.json`: an add-on id belongs to the account that first
+   signed it.
+3. `npm run sign`, then open the `.xpi` from `web-ext-artifacts/` in Firefox (or drag it
+   onto a window) and approve the install. Remove the temporary copy from
+   `about:debugging` first.
+
+Each upload needs a new `version` in the manifest, so bump it before signing again.
 
 ## Development
 

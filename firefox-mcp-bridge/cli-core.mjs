@@ -3,7 +3,7 @@
 // (click/type by query) become find_element + coordinate steps — the bridge
 // stays strictly schema-shaped; agent-friendliness lives client-side.
 
-const GLOBAL_BOOL = new Set(["json", "no-autostart", "replace"]);
+const GLOBAL_BOOL = new Set(["json", "no-autostart", "replace", "here"]);
 const GLOBAL_VALUE = new Set(["session", "profile", "timeout", "wait-for", "wait-timeout"]);
 const BOOL_FLAGS = new Set([
   ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "ctrl", "alt", "shift", "meta", "foreground",
@@ -59,8 +59,11 @@ function xyPair(value, name) {
 
 class UsageError extends Error {}
 
+// --here targets the tab the user is viewing ("active" is resolved by the
+// extension); otherwise un-targeted commands act on the agent tab.
 function withTab(args, flags) {
   if (flags.tab != null) args.tabId = num(flags.tab, "--tab");
+  else if (flags.here) args.tabId = "active";
   return args;
 }
 
@@ -106,6 +109,7 @@ const BUILDERS = {
     if (!pos[0]) throw new UsageError("usage: ff js <code>");
     const args = withTab({ code: pos[0] }, flags);
     if (flags.world) args.world = flags.world;
+    if (flags.max != null) args.maxLength = num(flags.max, "--max");
     return [{ tool: "javascript_tool", args }];
   },
   tab: (pos, flags) => {
@@ -166,7 +170,11 @@ const BUILDERS = {
   },
   open: (pos, flags) => {
     if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--profile P] [--foreground]");
-    return [{ tool: "open_tab", args: { url: pos[0], active: !!flags.foreground } }];
+    const args = { url: pos[0], active: !!flags.foreground };
+    // --as names a session; hand it to the extension as the tab-title marker
+    // label so the strip shows "🤖 <name> · …". Omitted → emoji-only stamp.
+    if (flags.as != null) args.label = flags.as;
+    return [{ tool: "open_tab", args }];
   },
   sessions: () => [{ tool: "session_list", args: {} }],
   session: (pos) => {
@@ -293,6 +301,9 @@ export function parseCli(argv) {
     if (flags.session != null && flags.tab != null) {
       return { ok: false, error: "-s/--session cannot be combined with --tab (the session owns its tab)" };
     }
+    if (flags.here && (flags.tab != null || flags.session != null)) {
+      return { ok: false, error: "--here cannot be combined with --tab or -s/--session" };
+    }
     if (flags.session != null && flags.profile != null) {
       return { ok: false, error: "-s/--session cannot be combined with --profile (the session owns its profile)" };
     }
@@ -324,7 +335,9 @@ export function formatResult(command, results, { json = false } = {}) {
   switch (command) {
     case "tabs": {
       const tabs = last?.tabs ?? [];
-      return tabs.map((t) => `${t.id}${t.active ? "*" : " "}  ${t.title ?? ""} — ${t.url ?? ""}`).join("\n");
+      return tabs
+        .map((t) => `${t.id}${t.active ? "*" : " "}  ${t.agent ? "🤖 " : ""}${t.title ?? ""} — ${t.url ?? ""}`)
+        .join("\n");
     }
     case "text":
       return typeof last?.text === "string" ? last.text : JSON.stringify(last, null, 2);
@@ -388,9 +401,13 @@ Act:     ff click <query> [--css SEL] | --at X,Y     (also: hover, dblclick, rcl
          ff drag --from X,Y --to X,Y
          ff select <css> <value> [--by-text]         ff check|uncheck <css>
 
+Commands run in the agent tab (🤖), a background tab \`ff nav\` opens and reuses —
+your view never switches. --here targets the tab you're viewing instead;
+\`ff tab activate\` brings the agent tab into view.
 <query> matches visible text/aria-label (find_element); add --css to scope.
-Global:  --tab N   -s NAME   --profile P   --json   --timeout MS   --no-autostart
+Global:  --tab N   --here   -s NAME   --profile P   --json   --timeout MS   --no-autostart
          --wait-for <css> [--wait-timeout MS]   poll until an element appears
-js prints string results raw; add --json for the full value as JSON.
+js prints string results raw; add --json for the full value as JSON. Results past
+50000 chars (ff js --max N to change) are truncated; --json shows truncated/length.
 The bridge auto-starts on demand; logs: ~/.firefox-mcp/bridge.log`;
 }

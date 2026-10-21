@@ -205,6 +205,32 @@ test("session conflicts are usage errors", () => {
   assert.match(parseCli(["text", "-s", "a", "--tab", "3"]).error, /--tab/);
 });
 
+test("--here targets the viewed tab (tabId \"active\") and conflicts with --tab / -s", () => {
+  assert.deepEqual(steps(["text", "--here"]).steps, [{ tool: "get_page_text", args: { tabId: "active" } }]);
+  assert.deepEqual(steps(["--here", "nav", "x.com"]).steps, [{ tool: "navigate", args: { url: "x.com", tabId: "active" } }]);
+  const click = steps(["click", "Go", "--here"]).steps;
+  assert.equal(click[0].args.tabId, "active");
+  assert.equal(click[1].buildArgs({ found: true, x: 1, y: 2 }).tabId, "active");
+  assert.match(parseCli(["text", "--here", "--tab", "3"]).error, /--here/);
+  assert.match(parseCli(["text", "--here", "-s", "a"]).error, /--here/);
+});
+
+test("ff js --max maps to maxLength", () => {
+  assert.deepEqual(steps(["js", "1+1", "--max", "100"]).steps, [
+    { tool: "javascript_tool", args: { code: "1+1", maxLength: 100 } },
+  ]);
+});
+
+test("formatResult marks the agent tab in ff tabs", () => {
+  const out = formatResult("tabs", [
+    { tool: "get_tabs_summary", result: { tabs: [
+      { id: 3, title: "Mine", url: "http://a", active: true },
+      { id: 12, title: "Agent's", url: "http://b", active: false, agent: true },
+    ] } },
+  ], { json: false });
+  assert.deepEqual(out.split("\n"), ["3*  Mine — http://a", "12   🤖 Agent's — http://b"]);
+});
+
 test("-s/--session/--profile with no following value is a usage error, in leading and trailing position", () => {
   for (const argv of [["-s"], ["--session"], ["--profile"]]) {
     const p = parseCli(argv);
@@ -225,13 +251,17 @@ test("-s/--session/--profile with no following value is a usage error, in leadin
   assert.match(parseCli(["text", "--profile"]).error, /--profile/);
 });
 
-test("open builds open_tab; --foreground activates; --as is captured", () => {
+test("open builds open_tab; --foreground activates; --as passes the label to the tab marker", () => {
   const p = parseCli(["open", "https://x.com", "--as", "research", "--foreground"]);
-  assert.deepEqual(p.steps, [{ tool: "open_tab", args: { url: "https://x.com", active: true } }]);
+  // --as flows into the open_tab args as `label` so the extension can stamp
+  // the session name onto the tab title; it's also captured on flags for the
+  // post-open session_bind that cli.mjs issues.
+  assert.deepEqual(p.steps, [{ tool: "open_tab", args: { url: "https://x.com", active: true, label: "research" } }]);
   assert.equal(p.flags.as, "research");
   assert.equal(parseCli(["open"]).ok, false);
+  // No --as → no label key at all (emoji-only stamp), and background by default.
   const bg = parseCli(["open", "https://x.com"]);
-  assert.equal(bg.steps[0].args.active, false);
+  assert.deepEqual(bg.steps, [{ tool: "open_tab", args: { url: "https://x.com", active: false } }]);
 });
 
 test("sessions / session rm / bind / profiles build the pseudo-tool steps", () => {

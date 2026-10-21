@@ -95,3 +95,23 @@ test("screenshot results are returned as an MCP image content block", async () =
   assert.equal(res.content[0].mimeType, "image/png");
   await server.close();
 });
+
+test("tool schemas are strict: unknown or out-of-range args are rejected, not dropped", async () => {
+  let dispatched = 0;
+  const relay = fakeRelay({ clientCount: 1, dispatch: () => (dispatched++, Promise.resolve({})) });
+  const { client, server } = await connectClient(relay);
+  const list = await client.listTools();
+  const nav = list.tools.find((t) => t.name === "navigate");
+  assert.equal(nav.inputSchema.additionalProperties, false);
+  assert.ok(nav.inputSchema.properties.url, "the strict object still advertises its properties");
+  for (const [name, args] of [
+    ["get_page_text", { maxLengthh: 10 }],
+    ["get_page_text", { maxLength: -1 }],
+    ["navigate", { url: "" }],
+  ]) {
+    const res = await client.callTool({ name, arguments: args });
+    assert.equal(res.isError, true, `${name} ${JSON.stringify(args)}`);
+  }
+  assert.equal(dispatched, 0);
+  await server.close();
+});

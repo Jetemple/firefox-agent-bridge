@@ -2,7 +2,7 @@
 // Loaded first in manifest background.scripts, so it creates globalThis.FFBridge
 // for the tool files and background.js to extend.
 
-// `var`, not `const`: MV3 background.scripts share one top-level lexical scope,
+// `var`, not `const`: background.scripts share one top-level lexical scope,
 // so a top-level `const FF` here AND in background.js would throw
 // "redeclaration of const FF" and abort background.js on load. `var` is the
 // idiomatic shared-scope binding (redeclaration is a no-op). The tool files use
