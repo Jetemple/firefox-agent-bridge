@@ -1,4 +1,4 @@
-// WebSocket client + tool dispatcher for the Claude Firefox Bridge.
+// WebSocket client + tool dispatcher for the Agent Bridge for Firefox.
 //
 // Connects to the owned MCP bridge on ws://127.0.0.1:3002, receives
 // {id, tool, args} requests, executes them with browser.* APIs, and replies
