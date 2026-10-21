@@ -165,6 +165,16 @@ test('validateDispatchBody accepts tabId "active" (ff --here) and rejects other 
   assert.equal(validateDispatchBody({ tool: "get_page_text", args: { tabId: "active" }, session: "s" }).ok, false);
 });
 
+test("validateDispatchBody rejects unknown args (strict) and out-of-range values", () => {
+  assert.equal(validateDispatchBody({ tool: "get_page_text", args: { bogusField: 1 } }).ok, false);
+  assert.equal(validateDispatchBody({ tool: "get_tabs_summary", args: { bogusField: 1 } }).ok, false);
+  assert.equal(validateDispatchBody({ tool: "get_page_text", args: { maxLength: -5 } }).ok, false);
+  assert.equal(validateDispatchBody({ tool: "get_links", args: { max: -1 } }).ok, false);
+  assert.equal(validateDispatchBody({ tool: "navigate", args: { url: "" } }).ok, false);
+  assert.equal(validateDispatchBody({ tool: "open_tab", args: { url: "" } }).ok, false);
+  assert.equal(validateDispatchBody({ tool: "javascript_tool", args: { code: "1", maxLength: 0 } }).ok, false);
+});
+
 test("validateDispatchBody passes open_tab's marker label through (ff open --as)", () => {
   const r = validateDispatchBody({ tool: "open_tab", args: { url: "x.com", active: false, label: "research" } });
   assert.equal(r.ok, true);

@@ -406,6 +406,20 @@ test('resolveTab("active") returns the viewed tab even when an agent tab exists'
   assert.equal(await FF.resolveTab("active"), active);
 });
 
+test("navigate and open_tab reject a blank url instead of loading https://", async () => {
+  const { FF } = loadWithTools({
+    tabs: {
+      create: async () => {
+        throw new Error("must not open a tab");
+      },
+    },
+  });
+  for (const url of ["", "   "]) {
+    await assert.rejects(FF.tools.navigate({ url }), (err) => err.code === "INVALID_ARGS");
+    await assert.rejects(FF.tools.open_tab({ url }), (err) => err.code === "INVALID_ARGS");
+  }
+});
+
 test("navigate with no tabId opens a background agent tab and marks it", async () => {
   const created = [];
   const { FF } = loadWithTools({

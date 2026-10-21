@@ -109,6 +109,7 @@ const BUILDERS = {
     if (!pos[0]) throw new UsageError("usage: ff js <code>");
     const args = withTab({ code: pos[0] }, flags);
     if (flags.world) args.world = flags.world;
+    if (flags.max != null) args.maxLength = num(flags.max, "--max");
     return [{ tool: "javascript_tool", args }];
   },
   tab: (pos, flags) => {
@@ -406,6 +407,7 @@ your view never switches. --here targets the tab you're viewing instead;
 <query> matches visible text/aria-label (find_element); add --css to scope.
 Global:  --tab N   --here   -s NAME   --profile P   --json   --timeout MS   --no-autostart
          --wait-for <css> [--wait-timeout MS]   poll until an element appears
-js prints string results raw; add --json for the full value as JSON.
+js prints string results raw; add --json for the full value as JSON. Results past
+50000 chars (ff js --max N to change) are truncated; --json shows truncated/length.
 The bridge auto-starts on demand; logs: ~/.firefox-mcp/bridge.log`;
 }

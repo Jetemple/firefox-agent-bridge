@@ -21,6 +21,7 @@ const TAB_FILES = [
   "tools/forward.js",
   "tools/tabs-summary.js",
   "tools/screenshot.js",
+  "tools/find-element.js",
 ];
 
 // Handlers run inside a vm sandbox, so objects they create live in another realm
@@ -142,6 +143,16 @@ test("screenshot captures a background tab in place — no tab activation, no wi
   assert.deepEqual(j(captured), [[12, { format: "jpeg", quality: 50 }]]);
   assert.equal(res.dataUrl, "data:image/png;base64,AA==");
   assert.equal(res.width, 800);
+});
+
+test("find_element rejects a call with neither text nor selector", async () => {
+  const FF = loadTabTools({});
+  FF.inject = async () => {
+    throw new Error("must not inject");
+  };
+  for (const args of [{}, { text: "" }, { selector: "" }]) {
+    await assert.rejects(FF.tools.find_element(args, { id: 1 }), (err) => err.code === "INVALID_ARGS");
+  }
 });
 
 test("back and forward drive tabs.goBack / tabs.goForward", async () => {

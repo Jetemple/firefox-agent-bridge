@@ -275,8 +275,9 @@ function connect() {
     return;
   }
 
-  // Regression guard: default MV3 CSP would upgrade ws:// to wss:// via
-  // upgrade-insecure-requests. The manifest drops that directive; verify it.
+  // Regression guard: an upgrade-insecure-requests CSP directive would turn
+  // ws:// into wss://, which the plain-ws bridge can't accept. The manifest CSP
+  // must not carry it; verify.
   if (!ws.url.startsWith("ws://")) {
     setStatus({
       state: "error",
@@ -327,9 +328,8 @@ browser.runtime.onMessage.addListener((message) => {
   return undefined;
 });
 
-// Keepalive: Firefox MV3 non-persistent event pages suspend after idle,
-// dropping the socket. A periodic alarm reliably wakes the page and
-// reconnects if the socket is down.
+// Keepalive: a safety net behind scheduleReconnect — if the socket is down for
+// any reason, the alarm retries connect() (a no-op while connected).
 const KEEPALIVE_ALARM = "ff-bridge-keepalive";
 browser.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.25 });
 browser.alarms.onAlarm.addListener((alarm) => {

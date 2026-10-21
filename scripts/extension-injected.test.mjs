@@ -211,12 +211,22 @@ test("viewportSize is self-contained and returns device-pixel dimensions", () =>
   assert.equal(r.h, 1200);
 });
 
-test("runUserCode is self-contained and evaluates the code string", () => {
+test("runUserCode is self-contained and evaluates the code string", async () => {
   const fn = reserialize(injected.runUserCode, {});
-  assert.equal(fn("40 + 2"), 42);
-  const obj = fn("({ a: 1, b: 2 })");
+  assert.deepEqual(plain(await fn("40 + 2", 100)), { result: 42 });
+  const { result: obj } = await fn("({ a: 1, b: 2 })", 100);
   assert.equal(obj.a, 1);
   assert.equal(obj.b, 2);
+  assert.equal((await fn("Promise.resolve(7)", 100)).result, 7, "awaits promises like executeScript did");
+});
+
+test("runUserCode caps oversized results: strings sliced, non-strings as JSON text", async () => {
+  const fn = reserialize(injected.runUserCode, {});
+  assert.deepEqual(plain(await fn("'x'.repeat(10)", 4)), { result: "xxxx", truncated: true, length: 10 });
+  assert.deepEqual(plain(await fn("[1,2,3,4,5]", 5)), { result: "[1,2,", truncated: true, length: 11 });
+  // Values JSON can't serialize pass through untouched (cloning decides, as before).
+  const cyclic = await fn("(() => { const o = {}; o.self = o; return o; })()", 5);
+  assert.equal(cyclic.truncated, undefined);
 });
 
 // --- group B: injected interaction tools ------------------------------------
@@ -446,6 +456,21 @@ test("findElement locates the first visible text match and returns center coords
 test("findElement reports not found when nothing matches", () => {
   const fn = reserialize(injected.findElement, { document: { querySelectorAll: () => [] } });
   assert.equal(fn("nope", null).found, false);
+});
+
+test("findElement never returns a hidden match, and caps the echoed query", () => {
+  const hidden = {
+    tagName: "BUTTON",
+    id: "",
+    classList: { length: 0 },
+    innerText: "Delete",
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }),
+  };
+  const fn = reserialize(injected.findElement, { document: { querySelectorAll: () => [hidden] } });
+  const res = fn("delete", null);
+  assert.equal(res.found, false);
+  assert.equal(res.hidden, 1);
+  assert.equal(fn("q".repeat(5000), null).text.length, 120);
 });
 
 test("getLinks returns anchor text and href, honoring max", () => {

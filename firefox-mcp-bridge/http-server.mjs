@@ -27,8 +27,8 @@ const DISPATCH_SCHEMAS = new Map(
   TOOLS.filter((t) => WS_TOOLS.has(t.name)).map((t) => [
     t.name,
     !t.inputSchema
-      ? z.object({})
-      : z.object("tabId" in t.inputSchema ? { ...t.inputSchema, tabId: DISPATCH_TAB_ID } : t.inputSchema),
+      ? z.object({}).strict()
+      : z.object("tabId" in t.inputSchema ? { ...t.inputSchema, tabId: DISPATCH_TAB_ID } : t.inputSchema).strict(),
   ]),
 );
 

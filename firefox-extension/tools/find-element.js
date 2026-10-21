@@ -38,8 +38,19 @@
       const r = el.getBoundingClientRect();
       return r && r.width > 0 && r.height > 0;
     });
-    const pick = visible[0] || matches[0] || null;
-    if (!pick) return { found: false, count: 0, text: text ?? null, selector: selector ?? null };
+    // Only visible elements count: a hidden match's coordinates would send a
+    // follow-up click somewhere else entirely. Echoed queries are capped so an
+    // oversized probe can't bloat the reply.
+    const pick = visible[0] || null;
+    if (!pick) {
+      return {
+        found: false,
+        count: matches.length,
+        hidden: matches.length,
+        text: text != null ? String(text).slice(0, 120) : null,
+        selector: selector != null ? String(selector).slice(0, 120) : null,
+      };
+    }
     const c = centerOf(pick);
     return {
       found: true,
@@ -54,6 +65,12 @@
 
   FF.injected.findElement = findElement;
 
-  FF.tools.find_element = async (args, tab) =>
-    FF.inject(tab.id, findElement, [args.text ?? null, args.selector ?? null]);
+  FF.tools.find_element = async (args, tab) => {
+    // With neither, the search matches every interactive element and returns
+    // an arbitrary one as found.
+    if (!args.text && !args.selector) {
+      throw FF.bridgeError("INVALID_ARGS", "find_element needs text, selector, or both");
+    }
+    return FF.inject(tab.id, findElement, [args.text ?? null, args.selector ?? null]);
+  };
 }

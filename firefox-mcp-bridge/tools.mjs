@@ -7,8 +7,10 @@ import { SESSION_NAME_RE } from "./sessions.mjs";
 // McpServer.registerTool throws on raw JSON Schema and on an empty `{}` shape,
 // so no-arg tools (ping_firefox, get_tabs_summary) omit inputSchema entirely.
 //
-// ping_firefox is answered bridge-locally; the other 7 are dispatched to the
-// Firefox extension over the WebSocket relay (see WS_TOOL_NAMES).
+// ping_firefox is answered bridge-locally; every other tool is dispatched to
+// the Firefox extension over the WebSocket relay (see WS_TOOL_NAMES). Both the
+// MCP server and /dispatch validate with these shapes in strict mode, so an
+// unknown argument is rejected rather than silently dropped.
 
 const tabId = z
   .number()
@@ -33,7 +35,7 @@ export const TOOLS = [
     description:
       "Load a URL without switching the user's view. Omit tabId to drive the agent tab (reused across calls; opened in the background if needed); specify tabId to navigate that tab.",
     inputSchema: {
-      url: z.string().describe("URL to navigate to (with or without protocol)"),
+      url: z.string().min(1).describe("URL to navigate to (with or without protocol)"),
       tabId: z
         .number()
         .describe("Optional: ID of an existing tab to navigate. If omitted, uses the agent tab.")
@@ -45,7 +47,7 @@ export const TOOLS = [
     description:
       "Open a URL in a new tab WITHOUT focusing it (set active: true to focus). Returns the new tabId.",
     inputSchema: {
-      url: z.string().describe("URL to open (with or without protocol)"),
+      url: z.string().min(1).describe("URL to open (with or without protocol)"),
       active: z
         .boolean()
         .describe("Focus the new tab. Default: false — agents must not steal the user's focus.")
@@ -79,6 +81,8 @@ export const TOOLS = [
       tabId,
       maxLength: z
         .number()
+        .int()
+        .min(0)
         .describe("Optional: truncate text to this many characters.")
         .optional(),
     },
@@ -118,6 +122,12 @@ export const TOOLS = [
         .describe(
           "Execution world. ISOLATED = content script sandbox (default), MAIN = page's own JS context (Firefox 128+).",
         )
+        .optional(),
+      maxLength: z
+        .number()
+        .int()
+        .min(1)
+        .describe("Cap the result at this many characters (JSON text for non-strings). Default: 50000.")
         .optional(),
     },
   },
@@ -264,7 +274,7 @@ export const TOOLS = [
     description: "List the page's links as { text, href }.",
     inputSchema: {
       tabId,
-      max: z.number().describe("Maximum number of links to return.").optional(),
+      max: z.number().int().min(0).describe("Maximum number of links to return.").optional(),
     },
   },
   {
@@ -272,7 +282,7 @@ export const TOOLS = [
     description: "Extract the page's tables as arrays of rows of cell text.",
     inputSchema: {
       tabId,
-      max: z.number().describe("Maximum number of tables to return.").optional(),
+      max: z.number().int().min(0).describe("Maximum number of tables to return.").optional(),
     },
   },
 ];

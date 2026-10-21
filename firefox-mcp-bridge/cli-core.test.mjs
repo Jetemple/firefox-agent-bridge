@@ -215,6 +215,12 @@ test("--here targets the viewed tab (tabId \"active\") and conflicts with --tab 
   assert.match(parseCli(["text", "--here", "-s", "a"]).error, /--here/);
 });
 
+test("ff js --max maps to maxLength", () => {
+  assert.deepEqual(steps(["js", "1+1", "--max", "100"]).steps, [
+    { tool: "javascript_tool", args: { code: "1+1", maxLength: 100 } },
+  ]);
+});
+
 test("formatResult marks the agent tab in ff tabs", () => {
   const out = formatResult("tabs", [
     { tool: "get_tabs_summary", result: { tabs: [

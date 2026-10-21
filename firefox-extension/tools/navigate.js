@@ -7,6 +7,7 @@
 
   function normalizeUrl(input) {
     const u = String(input).trim();
+    if (!u) throw FF.bridgeError("INVALID_ARGS", "url is empty");
     if (/^(https?|file|ftp|about|moz-extension|view-source|data):/i.test(u)) return u;
     if (u.startsWith("//")) return "https:" + u;
     return "https://" + u;
