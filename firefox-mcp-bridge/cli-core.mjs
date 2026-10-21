@@ -166,7 +166,11 @@ const BUILDERS = {
   },
   open: (pos, flags) => {
     if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--profile P] [--foreground]");
-    return [{ tool: "open_tab", args: { url: pos[0], active: !!flags.foreground } }];
+    const args = { url: pos[0], active: !!flags.foreground };
+    // --as names a session; hand it to the extension as the tab-title marker
+    // label so the strip shows "🤖 <name> · …". Omitted → emoji-only stamp.
+    if (flags.as != null) args.label = flags.as;
+    return [{ tool: "open_tab", args }];
   },
   sessions: () => [{ tool: "session_list", args: {} }],
   session: (pos) => {

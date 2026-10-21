@@ -8,6 +8,8 @@ import { createContext, runInContext } from "node:vm";
 const SOURCE = readFileSync(new URL("../firefox-extension/background.js", import.meta.url), "utf8");
 const NAVIGATE_SOURCE = readFileSync(new URL("../firefox-extension/tools/navigate.js", import.meta.url), "utf8");
 const OPEN_TAB_SOURCE = readFileSync(new URL("../firefox-extension/tools/open-tab.js", import.meta.url), "utf8");
+const RESTRICTED_SOURCE = readFileSync(new URL("../firefox-extension/restricted.js", import.meta.url), "utf8");
+const MARKER_SOURCE = readFileSync(new URL("../firefox-extension/marker.js", import.meta.url), "utf8");
 
 class FakeWebSocket {
   static instances = [];
@@ -103,10 +105,28 @@ function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
     },
   };
   createContext(sandbox);
+  // restricted.js + marker.js load first in the real manifest; open-tab.js and
+  // background.js's onUpdated listener depend on FF.markedTabs / FF.isRestricted.
+  runInContext(RESTRICTED_SOURCE, sandbox, { filename: "restricted.js" });
+  runInContext(MARKER_SOURCE, sandbox, { filename: "marker.js" });
   runInContext(SOURCE, sandbox, { filename: "background.js" });
   runInContext(NAVIGATE_SOURCE, sandbox, { filename: "navigate.js" });
   runInContext(OPEN_TAB_SOURCE, sandbox, { filename: "open-tab.js" });
-  return { FF: sandbox.FFBridge, stored };
+  // `sandbox` is the vm's global: setting sandbox.document lets a test drive
+  // FF.pageStamp, whose free `document` reference resolves to it.
+  return { FF: sandbox.FFBridge, stored, sandbox };
+}
+
+// loadWithTools + a captured FF.inject, for the tab-marker paths (open_tab
+// registration and the onUpdated re-stamp). Real FF.inject would need
+// browser.scripting; we only care which (tabId, prefix) it's asked to apply.
+function loadMarked(opts = {}) {
+  const ctx = loadWithTools(opts);
+  ctx.injectCalls = [];
+  ctx.FF.inject = async (tabId, fn, args) => {
+    ctx.injectCalls.push({ tabId, args });
+  };
+  return ctx;
 }
 
 test("resolveTab throws TAB_NOT_FOUND for an explicit stale tabId — never the active tab", async () => {
@@ -234,4 +254,99 @@ test("open_tab activates only when asked", async () => {
   });
   await FF.tools.open_tab({ url: "https://x.com", active: true });
   assert.equal(created[0].active, true);
+});
+
+// --- tab marker ------------------------------------------------------------
+
+test("open_tab registers the opened tab for marking, carrying the session label", async () => {
+  const { FF } = loadMarked({ tabs: { create: async () => ({ id: 55, windowId: 2 }) } });
+  await FF.tools.open_tab({ url: "example.com", label: "airbnb" });
+  assert.equal(FF.markedTabs.get(55), "airbnb");
+});
+
+test("open_tab with no label registers an emoji-only mark (null)", async () => {
+  const { FF } = loadMarked({ tabs: { create: async () => ({ id: 7, windowId: 1 }) } });
+  await FF.tools.open_tab({ url: "example.com" });
+  assert.equal(FF.markedTabs.has(7), true);
+  assert.equal(FF.markedTabs.get(7), null);
+});
+
+test("onTabUpdated stamps a marked tab on load-complete with the session prefix", async () => {
+  const ctx = loadMarked();
+  ctx.FF.markedTabs.set(55, "airbnb");
+  await ctx.FF.onTabUpdated(55, { status: "complete" }, { url: "https://x.com" });
+  assert.equal(ctx.injectCalls.length, 1);
+  assert.equal(ctx.injectCalls[0].tabId, 55);
+  // args = [regexSource, prefix]; the prefix carries the label.
+  assert.equal(ctx.injectCalls[0].args[1], "🤖 airbnb · ");
+  assert.equal(ctx.injectCalls[0].args[0], ctx.FF.markerRegexSource());
+});
+
+test("onTabUpdated re-stamps on a title change (SPA/late title write)", async () => {
+  const ctx = loadMarked();
+  ctx.FF.markedTabs.set(7, null);
+  await ctx.FF.onTabUpdated(7, { title: "New Route" }, { url: "https://x.com" });
+  assert.equal(ctx.injectCalls.length, 1);
+  assert.equal(ctx.injectCalls[0].args[1], "🤖 "); // emoji-only prefix
+});
+
+test("onTabUpdated ignores unmarked tabs", async () => {
+  const ctx = loadMarked();
+  await ctx.FF.onTabUpdated(999, { status: "complete" }, { url: "https://x.com" });
+  assert.equal(ctx.injectCalls.length, 0);
+});
+
+test("onTabUpdated ignores changes that are neither title nor load-complete", async () => {
+  const ctx = loadMarked();
+  ctx.FF.markedTabs.set(7, "airbnb");
+  await ctx.FF.onTabUpdated(7, { favIconUrl: "x" }, { url: "https://x.com" });
+  await ctx.FF.onTabUpdated(7, { status: "loading" }, { url: "https://x.com" });
+  assert.equal(ctx.injectCalls.length, 0);
+});
+
+test("onTabUpdated skips restricted / unknown urls", async () => {
+  const ctx = loadMarked();
+  ctx.FF.markedTabs.set(7, "airbnb");
+  await ctx.FF.onTabUpdated(7, { status: "complete" }, { url: "about:blank" });
+  await ctx.FF.onTabUpdated(7, { status: "complete" }, {}); // no url → treated as restricted
+  assert.equal(ctx.injectCalls.length, 0);
+});
+
+test("onTabUpdated swallows injection failures (transient load races)", async () => {
+  const ctx = loadWithTools();
+  ctx.FF.markedTabs.set(7, "airbnb");
+  ctx.FF.inject = async () => {
+    throw ctx.FF.bridgeError("SCRIPT_FAILED", "executeScript failed");
+  };
+  await assert.doesNotReject(ctx.FF.onTabUpdated(7, { status: "complete" }, { url: "https://x.com" }));
+});
+
+test("onTabRemoved drops the mark", () => {
+  const ctx = loadMarked();
+  ctx.FF.markedTabs.set(7, "airbnb");
+  ctx.FF.onTabRemoved(7);
+  assert.equal(ctx.FF.markedTabs.has(7), false);
+});
+
+test("pageStamp (in-page) stamps, is idempotent, and re-stamps a page-changed title", () => {
+  const ctx = loadWithTools();
+  const re = ctx.FF.markerRegexSource();
+  const prefix = ctx.FF.markerPrefix("airbnb");
+  ctx.sandbox.document = { title: "Airbnb — Rentals" };
+
+  ctx.FF.pageStamp(re, prefix);
+  assert.equal(ctx.sandbox.document.title, "🤖 airbnb · Airbnb — Rentals");
+
+  // Idempotent — running again writes the identical string (no double-stamp,
+  // no runaway onUpdated loop).
+  ctx.FF.pageStamp(re, prefix);
+  assert.equal(ctx.sandbox.document.title, "🤖 airbnb · Airbnb — Rentals");
+
+  // The page (SPA) replaces the title → strip finds no marker, prepend applies.
+  ctx.sandbox.document.title = "New Route";
+  ctx.FF.pageStamp(re, prefix);
+  assert.equal(ctx.sandbox.document.title, "🤖 airbnb · New Route");
+
+  // pageStamp's write matches buildTitle exactly — no format drift.
+  assert.equal(ctx.sandbox.document.title, ctx.FF.buildTitle("New Route", "airbnb"));
 });

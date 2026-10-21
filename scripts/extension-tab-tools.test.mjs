@@ -13,11 +13,13 @@ const EXT = resolve(dirname(fileURLToPath(import.meta.url)), "../firefox-extensi
 
 const TAB_FILES = [
   "restricted.js",
+  "marker.js",
   "tools/close-tab.js",
   "tools/activate-tab.js",
   "tools/reload.js",
   "tools/back.js",
   "tools/forward.js",
+  "tools/tabs-summary.js",
 ];
 
 // Handlers run inside a vm sandbox, so objects they create live in another realm
@@ -82,6 +84,26 @@ test("reload reloads the tab, passing bypassCache through", async () => {
     [3, { bypassCache: true }],
     [3, { bypassCache: false }],
   ]);
+});
+
+test("get_tabs_summary strips the agent marker so agents read clean titles", async () => {
+  const FF = loadTabTools({
+    tabs: {
+      query: async () => [
+        { id: 1, url: "https://x.com", title: "🤖 airbnb · Airbnb — Rentals", active: true, pinned: false, windowId: 1 },
+        { id: 2, url: "https://y.com", title: "🤖 Plain agent tab", active: false, pinned: false, windowId: 1 },
+        { id: 3, url: "https://z.com", title: "Untouched user tab", active: false, pinned: false, windowId: 1 },
+      ],
+    },
+  });
+  const res = await FF.tools.get_tabs_summary();
+  assert.deepEqual(
+    res.tabs.map((t) => t.title),
+    ["Airbnb — Rentals", "Plain agent tab", "Untouched user tab"],
+  );
+  // Other fields pass through untouched.
+  assert.equal(res.tabs[0].id, 1);
+  assert.equal(res.tabs[0].url, "https://x.com");
 });
 
 test("back and forward drive tabs.goBack / tabs.goForward", async () => {

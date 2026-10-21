@@ -21,6 +21,7 @@
   "background": {
     "scripts": [
       "restricted.js",
+      "marker.js",
       "tools/tabs-summary.js",
       "tools/navigate.js",
       "tools/open-tab.js",

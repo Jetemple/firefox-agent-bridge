@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SESSION_NAME_RE } from "./sessions.mjs";
 
 // Tool definitions for the Firefox MCP bridge.
 //
@@ -45,6 +46,11 @@ export const TOOLS = [
       active: z
         .boolean()
         .describe("Focus the new tab. Default: false — agents must not steal the user's focus.")
+        .optional(),
+      label: z
+        .string()
+        .regex(SESSION_NAME_RE)
+        .describe("Short name shown in the tab strip as \"🤖 label · title\".")
         .optional(),
     },
   },

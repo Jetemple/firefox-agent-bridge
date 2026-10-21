@@ -225,13 +225,17 @@ test("-s/--session/--profile with no following value is a usage error, in leadin
   assert.match(parseCli(["text", "--profile"]).error, /--profile/);
 });
 
-test("open builds open_tab; --foreground activates; --as is captured", () => {
+test("open builds open_tab; --foreground activates; --as passes the label to the tab marker", () => {
   const p = parseCli(["open", "https://x.com", "--as", "research", "--foreground"]);
-  assert.deepEqual(p.steps, [{ tool: "open_tab", args: { url: "https://x.com", active: true } }]);
+  // --as flows into the open_tab args as `label` so the extension can stamp
+  // the session name onto the tab title; it's also captured on flags for the
+  // post-open session_bind that cli.mjs issues.
+  assert.deepEqual(p.steps, [{ tool: "open_tab", args: { url: "https://x.com", active: true, label: "research" } }]);
   assert.equal(p.flags.as, "research");
   assert.equal(parseCli(["open"]).ok, false);
+  // No --as → no label key at all (emoji-only stamp), and background by default.
   const bg = parseCli(["open", "https://x.com"]);
-  assert.equal(bg.steps[0].args.active, false);
+  assert.deepEqual(bg.steps, [{ tool: "open_tab", args: { url: "https://x.com", active: false } }]);
 });
 
 test("sessions / session rm / bind / profiles build the pseudo-tool steps", () => {

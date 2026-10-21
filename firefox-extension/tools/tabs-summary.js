@@ -9,7 +9,9 @@
       tabs: tabs.map((t) => ({
         id: t.id,
         url: t.url,
-        title: t.title,
+        // Strip the agent marker: the human sees "🤖 …" in the strip, but the
+        // agent reads the real title back (marker.js is loaded before this).
+        title: FF.stripMarker(t.title),
         active: t.active,
         pinned: t.pinned,
         windowId: t.windowId,

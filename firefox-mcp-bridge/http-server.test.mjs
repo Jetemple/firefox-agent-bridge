@@ -157,6 +157,13 @@ test("validateDispatchBody rejects args failing the tool's schema", () => {
   assert.equal(validateDispatchBody({ tool: "navigate", args: {} }).ok, false);
 });
 
+test("validateDispatchBody passes open_tab's marker label through (ff open --as)", () => {
+  const r = validateDispatchBody({ tool: "open_tab", args: { url: "x.com", active: false, label: "research" } });
+  assert.equal(r.ok, true);
+  assert.equal(r.args.label, "research");
+  assert.equal(validateDispatchBody({ tool: "open_tab", args: { url: "x.com", label: "Bad Name" } }).ok, false);
+});
+
 test("validateDispatchBody defaults args to {} for no-schema tools", () => {
   const r = validateDispatchBody({ tool: "get_tabs_summary" });
   assert.equal(r.ok, true);
