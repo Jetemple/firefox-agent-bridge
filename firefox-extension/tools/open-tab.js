@@ -12,6 +12,12 @@
     // undefined → emoji-only. `?.` keeps this a no-op in harnesses without
     // marker.js loaded.
     FF.markedTabs?.set(tab.id, args.label ?? null);
-    return { tabId: tab.id, windowId: tab.windowId, url };
+    // Report the tab that will stay valid (a container extension may reopen it
+    // under a new id) and the URL it actually landed on.
+    const landed = FF.isRestricted(url) ? null : await FF.settleTab?.(tab.id);
+    if (landed && !FF.isRestricted(landed.url)) {
+      return { tabId: landed.id, windowId: landed.windowId, url: landed.url };
+    }
+    return { tabId: FF.followTab?.(tab.id) ?? tab.id, windowId: tab.windowId, url };
   };
 }

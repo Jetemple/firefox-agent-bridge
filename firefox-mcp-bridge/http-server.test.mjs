@@ -401,6 +401,23 @@ test("session_bind validates the tab, records runId, and close_tab removes the s
   await close();
 });
 
+test("close_agent_tabs drops the sessions bound to the tabs it closed", async () => {
+  const relay = stubRelay({
+    profiles: [{ name: "work", runId: "run-1", connectedAt: 1 }],
+    results: { close_agent_tabs: { closed: [42, 43], kept: [] } },
+  });
+  const sessions = createSessionStore({ filePath: null });
+  sessions.bind("gone", { profile: "work", tabId: 42, runId: "run-1", url: "https://a.example" });
+  sessions.bind("kept", { profile: "work", tabId: 7, runId: "run-1", url: "https://b.example" });
+  sessions.bind("other-profile", { profile: "home", tabId: 43, runId: "run-2", url: "https://c.example" });
+  const { url, close } = await startServer({ relay, sessions });
+
+  const res = await postDispatch(url, { tool: "close_agent_tabs", args: {} });
+  assert.deepEqual(res.body.result.closed, [42, 43]);
+  assert.deepEqual(sessions.list().map((r) => r.name).sort(), ["kept", "other-profile"]);
+  await close();
+});
+
 test("session_list computes liveness and current url; profiles_list lists connections", async () => {
   const relay = stubRelay({
     profiles: [{ name: "work", runId: "run-1", connectedAt: 1 }],
@@ -508,10 +525,41 @@ test("/mcp supports two concurrent sessions and rejects unknown session ids", as
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
     });
-    assert.equal(unknown.status, 400);
+    assert.equal(unknown.status, 404, "404 tells a client its session is gone and to re-initialize");
 
     await parts.closeAllSessions();
     assert.equal(parts.sessionCount(), 0);
+  } finally {
+    await close();
+  }
+});
+
+test("/mcp closes sessions idle past mcpIdleMs and keeps active ones", async () => {
+  const relay = stubRelay();
+  let t = 1_000_000;
+  const parts = createBridgeHttpServer({
+    relay, startedAt: 0, fileToken: TOKEN, envToken: null, mcpIdleMs: 60_000, now: () => t,
+  });
+  const { port, close } = await listen(parts);
+  try {
+    const stale = (await mcpInitialize(port)).headers.get("mcp-session-id");
+    t += 50_000;
+    const fresh = (await mcpInitialize(port)).headers.get("mcp-session-id");
+    t += 20_000; // stale is 70s idle, fresh 20s
+    await parts.sweepIdleSessions();
+    assert.equal(parts.sessionCount(), 1);
+    const gone = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-session-id": stale,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+    });
+    assert.equal(gone.status, 404);
+    assert.ok(fresh);
+    await parts.closeAllSessions();
   } finally {
     await close();
   }

@@ -67,6 +67,13 @@ and `ff tab activate` brings the agent tab into view when you want to watch.
 If you close the agent tab, commands error until the next `ff nav` rather than
 falling through to your tab.
 
+Some extensions reopen a tab under a new id as it loads; container extensions
+do this to sites they assign to a container. `ff` follows the swap, and
+`ff open`/`ff nav` report the id the page ended up in. When you're done,
+`ff tab close --mine` closes every tab the agent opened except the one you're
+viewing (`--dry-run` lists them first). It only knows about tabs opened since
+the extension last started, and it covers every agent's tabs, not just yours.
+
 ## Sessions & profiles
 
 Multiple agents (or one agent juggling tabs) can each pin a named session to a
@@ -99,7 +106,7 @@ Run `ff --help` for the one-screen version. Highlights:
 | | |
 | --- | --- |
 | `ff status` / `start` / `stop` / `ping` | bridge lifecycle & health |
-| `ff tabs`, `ff tab close\|activate [--tab N]` | tab management |
+| `ff tabs`, `ff tab close\|activate [--tab N]`, `ff tab close --mine [--dry-run]` | tab management |
 | `ff nav <url>`, `ff reload [--hard]`, `ff back`, `ff forward` | navigation |
 | `ff text`, `ff links`, `ff tables`, `ff find <text>` | reading pages |
 | `ff screenshot [-o f.png] [--jpeg]` | capture (writes a file, prints the path) |

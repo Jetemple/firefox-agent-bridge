@@ -15,6 +15,7 @@ const TAB_FILES = [
   "restricted.js",
   "marker.js",
   "tools/close-tab.js",
+  "tools/close-agent-tabs.js",
   "tools/activate-tab.js",
   "tools/reload.js",
   "tools/back.js",
@@ -166,4 +167,42 @@ test("back and forward drive tabs.goBack / tabs.goForward", async () => {
   assert.equal((await FF.tools.back({ tabId: 2 })).navigated, "back");
   assert.equal((await FF.tools.forward({ tabId: 2 })).navigated, "forward");
   assert.deepEqual(calls, [["back", 2], ["forward", 2]]);
+});
+
+test("close_agent_tabs closes the agent's background tabs and leaves the one you're viewing", async () => {
+  const removed = [];
+  const FF = loadTabTools({
+    tabs: {
+      query: async () => [
+        { id: 1, active: false },
+        { id: 2, active: true },
+        { id: 3, active: false },
+        { id: 4, active: false },
+      ],
+      remove: async (ids) => removed.push(...ids),
+    },
+  });
+  FF.expectedCloses = new Set();
+  FF.markedTabs.set(1, "a");
+  FF.markedTabs.set(2, null);
+  FF.agentTabId = 3;
+
+  const dry = await FF.tools.close_agent_tabs({ dryRun: true });
+  assert.deepEqual(j(dry), { closed: [], wouldClose: [1, 3], kept: [2] });
+  assert.deepEqual(removed, [], "a dry run closes nothing");
+
+  const res = await FF.tools.close_agent_tabs({});
+  assert.deepEqual(j(res), { closed: [1, 3], kept: [2] });
+  assert.deepEqual(removed, [1, 3], "tab 4 was never the agent's");
+  assert.deepEqual([...FF.expectedCloses].sort(), [1, 3], "closes are deliberate, not container reopens");
+});
+
+test("get_tabs_summary flags every agent-opened tab with opened: true", async () => {
+  const FF = loadTabTools({
+    tabs: { query: async () => [{ id: 1, title: "a" }, { id: 2, title: "b" }, { id: 3, title: "c" }] },
+  });
+  FF.markedTabs.set(1, null);
+  FF.agentTabId = 2;
+  const { tabs } = j(await FF.tools.get_tabs_summary());
+  assert.deepEqual(tabs.map((t) => [t.id, !!t.opened, !!t.agent]), [[1, true, false], [2, true, true], [3, false, false]]);
 });

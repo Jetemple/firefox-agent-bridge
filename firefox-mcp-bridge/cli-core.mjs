@@ -6,7 +6,7 @@
 const GLOBAL_BOOL = new Set(["json", "no-autostart", "replace", "here"]);
 const GLOBAL_VALUE = new Set(["session", "profile", "timeout", "wait-for", "wait-timeout"]);
 const BOOL_FLAGS = new Set([
-  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "ctrl", "alt", "shift", "meta", "foreground",
+  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "mine", "dry-run", "ctrl", "alt", "shift", "meta", "foreground",
 ]);
 
 function tokenize(argv) {
@@ -113,9 +113,13 @@ const BUILDERS = {
     return [{ tool: "javascript_tool", args }];
   },
   tab: (pos, flags) => {
+    if (pos[0] === "close" && flags.mine) {
+      if (flags.tab != null || flags.here) throw new UsageError("--mine closes every agent-opened tab; drop --tab/--here");
+      return [{ tool: "close_agent_tabs", args: flags["dry-run"] ? { dryRun: true } : {} }];
+    }
     if (pos[0] === "close") return [{ tool: "close_tab", args: withTab({}, flags) }];
     if (pos[0] === "activate") return [{ tool: "activate_tab", args: withTab({}, flags) }];
-    throw new UsageError("usage: ff tab close|activate [--tab N]");
+    throw new UsageError("usage: ff tab close|activate [--tab N], or ff tab close --mine [--dry-run]");
   },
   reload: (pos, flags) => {
     const args = withTab({}, flags);
@@ -372,6 +376,16 @@ export function formatResult(command, results, { json = false } = {}) {
     }
     case "open":
       return `tab ${last?.tabId}`;
+    case "tab": {
+      if (!Array.isArray(last?.closed)) return JSON.stringify(last, null, 2);
+      const kept = last.kept?.length ? ` (left ${last.kept.join(", ")} open: you're viewing it)` : "";
+      if (last.wouldClose) {
+        return last.wouldClose.length
+          ? `would close ${last.wouldClose.length} agent tab(s): ${last.wouldClose.join(", ")}${kept}`
+          : `no agent tabs to close${kept}`;
+      }
+      return `closed ${last.closed.length} agent tab(s): ${last.closed.join(", ")}${kept}`;
+    }
     case "bind":
       return `session ${last?.name} → tab ${last?.tabId} (profile ${last?.profile})`;
     case "session":
@@ -386,6 +400,7 @@ export function usageText() {
 
 Bridge:  ff status | start [--replace] | stop | ping
 Tabs:    ff tabs                        ff tab close|activate [--tab N]
+         ff tab close --mine [--dry-run]  close every tab the agent opened
          ff nav <url> [--tab N]         ff reload [--hard] | back | forward
          ff open <url> [--as NAME] [--foreground]
 Session: ff sessions | ff session rm NAME | ff bind NAME --tab N

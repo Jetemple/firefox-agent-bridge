@@ -135,6 +135,29 @@ test("global flags: --json and --timeout are extracted", () => {
 
 // --- formatting ---
 
+test("ff tab close --mine [--dry-run] → close_agent_tabs; refuses a tab target", () => {
+  assert.deepEqual(steps(["tab", "close", "--mine"]).steps, [{ tool: "close_agent_tabs", args: {} }]);
+  assert.deepEqual(steps(["tab", "close", "--mine", "--dry-run"]).steps, [
+    { tool: "close_agent_tabs", args: { dryRun: true } },
+  ]);
+  for (const extra of [["--tab", "3"], ["--here"]]) {
+    const p = parseCli(["tab", "close", "--mine", ...extra]);
+    assert.equal(p.ok, false);
+    assert.match(p.error, /--mine/);
+  }
+});
+
+test("formatResult reports which agent tabs closed, would close, or stayed open", () => {
+  const fmt = (result) => formatResult("tab", [{ tool: "close_agent_tabs", result }]);
+  assert.equal(fmt({ closed: [5, 6], kept: [] }), "closed 2 agent tab(s): 5, 6");
+  assert.equal(
+    fmt({ closed: [5], kept: [9] }),
+    "closed 1 agent tab(s): 5 (left 9 open: you're viewing it)",
+  );
+  assert.equal(fmt({ closed: [], wouldClose: [5], kept: [] }), "would close 1 agent tab(s): 5");
+  assert.equal(fmt({ closed: [], wouldClose: [], kept: [] }), "no agent tabs to close");
+});
+
 test("formatResult renders tabs, text, find, and links as plain text", () => {
   const tabs = formatResult("tabs", [
     { tool: "get_tabs_summary", result: { tabs: [{ id: 1, title: "A", url: "http://a", active: true }] } },
