@@ -77,12 +77,13 @@ function toWireError(err) {
 // --- script injection helper ---------------------------------------------
 
 // Runs `func(...args)` in the page and returns its single result, mapping any
-// failure to SCRIPT_FAILED. `world` is "ISOLATED" (default) or "MAIN".
-FF.inject = async function inject(tabId, func, args = [], world) {
+// failure to SCRIPT_FAILED. `world` is "ISOLATED" (default) or "MAIN". `frameId`
+// targets one frame (top frame by default).
+FF.inject = async function inject(tabId, func, args = [], world, frameId) {
   let results;
   try {
     results = await browser.scripting.executeScript({
-      target: { tabId },
+      target: frameId ? { tabId, frameIds: [frameId] } : { tabId },
       func,
       args,
       ...(world ? { world } : {}),
@@ -94,6 +95,41 @@ FF.inject = async function inject(tabId, func, args = [], world) {
   if (!first) throw bridgeError("SCRIPT_FAILED", "executeScript returned no result");
   if (first.error) throw bridgeError("SCRIPT_FAILED", String(first.error));
   return first.result;
+};
+
+// Runs `func(...args)` in every frame below the top one, resolving to
+// [{ frameId, result }]. injectImmediately because executeScript otherwise waits
+// for each frame's document_idle, so one stalled ad iframe would hang the call.
+// Frames that can't be scripted or answer null are left out.
+FF.injectChildFrames = async function injectChildFrames(tabId, func, args = []) {
+  let results;
+  try {
+    results = await browser.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      injectImmediately: true,
+      func,
+      args,
+    });
+  } catch {
+    return [];
+  }
+  return results
+    .filter((r) => r.frameId && !r.error && r.result != null)
+    .sort((a, b) => a.frameId - b.frameId)
+    .map(({ frameId, result }) => ({ frameId, result }));
+};
+
+// FF.inject for functions that may answer { descend: { frameId, args? } } when
+// the element they want sits inside an iframe: replays them in that frame.
+const MAX_FRAME_DEPTH = 16;
+FF.injectDescending = async function injectDescending(tabId, func, args, frameId) {
+  for (let depth = 0; depth < MAX_FRAME_DEPTH; depth++) {
+    const res = await FF.inject(tabId, func, args, undefined, frameId);
+    if (!res?.descend) return frameId ? { ...res, frameId } : res;
+    frameId = res.descend.frameId;
+    args = res.descend.args ?? args;
+  }
+  throw bridgeError("SCRIPT_FAILED", "frames nested too deeply");
 };
 
 // --- tab marker ----------------------------------------------------------

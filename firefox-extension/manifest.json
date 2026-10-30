@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Agent Bridge for Firefox",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Lets AI agents drive your logged-in Firefox through a local bridge (ff CLI and MCP clients).",
   "browser_specific_settings": {
     "gecko": {
@@ -30,7 +30,7 @@
       "tools/open-tab.js",
       "tools/screenshot.js",
       "tools/get-page-text.js",
-      "tools/click.js",
+      "tools/pointer.js",
       "tools/type.js",
       "tools/javascript-tool.js",
       "tools/close-tab.js",
@@ -41,9 +41,6 @@
       "tools/forward.js",
       "tools/press-key.js",
       "tools/scroll.js",
-      "tools/hover.js",
-      "tools/double-click.js",
-      "tools/right-click.js",
       "tools/drag.js",
       "tools/select-option.js",
       "tools/set-checkbox.js",

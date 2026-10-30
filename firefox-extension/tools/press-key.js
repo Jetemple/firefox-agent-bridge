@@ -14,12 +14,20 @@
       return el.tagName.toLowerCase() + id + cls;
     }
     const m = mods || {};
-    const active = document.activeElement;
+    // activeElement stops at the shadow host, and at the <iframe> holding focus.
+    let active = document.activeElement;
+    for (let root; active && (root = active.openOrClosedShadowRoot ?? active.shadowRoot) && root.activeElement; ) {
+      active = root.activeElement;
+    }
+    if (active && (active.tagName === "IFRAME" || active.tagName === "FRAME")) {
+      return { descend: { frameId: browser.runtime.getFrameId(active) } };
+    }
     const target = active && active !== document.body ? active : document.body || document.documentElement;
     const opts = {
       key,
       bubbles: true,
       cancelable: true,
+      composed: true,
       ctrlKey: !!m.ctrl,
       altKey: !!m.alt,
       shiftKey: !!m.shift,
@@ -34,7 +42,7 @@
   FF.injected.performPressKey = performPressKey;
 
   FF.tools.press_key = async (args, tab) =>
-    FF.inject(tab.id, performPressKey, [
+    FF.injectDescending(tab.id, performPressKey, [
       args.key,
       { ctrl: !!args.ctrl, alt: !!args.alt, shift: !!args.shift, meta: !!args.meta },
     ]);

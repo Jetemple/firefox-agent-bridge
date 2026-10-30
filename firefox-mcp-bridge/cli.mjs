@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadOrCreateToken, DEFAULT_TOKEN_PATH } from "../scripts/secure-config.mjs";
-import { parseCli, formatResult, usageText } from "./cli-core.mjs";
+import { parseCli, formatResult, formatTab, splitLeadingGlobals, usageText } from "./cli-core.mjs";
 
 const INDEX = resolve(dirname(fileURLToPath(import.meta.url)), "index.mjs");
 
@@ -79,18 +79,27 @@ function readStdinAll() {
   });
 }
 
+const POINTER_DONE = { click: "clicked", hover: "hovered", double_click: "doubleClicked", right_click: "rightClicked" };
+
 // `ff js` accepts code inline, from a file (`-f <path>`), or from stdin (`-`),
 // so non-trivial scripts skip shell-escaping entirely. File/stdin reads are I/O
 // and live here; cli-core stays pure. Returns a rewritten argv with the code as
 // the sole js positional. Throws CliError(2) on an unreadable file.
 async function resolveJsSource(argv, deps) {
-  if (argv[0] !== "js") return argv;
+  let split;
+  try {
+    split = splitLeadingGlobals(argv);
+  } catch {
+    return argv; // parseCli reports the same usage error
+  }
+  const { globals, rest: command } = split;
+  if (command[0] !== "js") return argv;
   let code = null;
   const rest = [];
-  for (let i = 1; i < argv.length; i++) {
-    const a = argv[i];
+  for (let i = 1; i < command.length; i++) {
+    const a = command[i];
     if (a === "-f" || a === "--file") {
-      const path = argv[++i];
+      const path = command[++i];
       if (path == null) throw new CliError("usage: ff js -f <file>", 2);
       try {
         code = deps.readFileFn(path, "utf8");
@@ -103,7 +112,7 @@ async function resolveJsSource(argv, deps) {
       rest.push(a);
     }
   }
-  return code == null ? argv : ["js", code, ...rest];
+  return code == null ? argv : [...globals, "js", code, ...rest];
 }
 
 // Client-side `--wait-for <css>`: poll find_element until the selector appears
@@ -319,6 +328,22 @@ export async function runCli(argv, overrides = {}) {
     await ensureBridge(settings, deps);
     const envelope = { session: parsed.flags.session, profile: parsed.flags.profile };
 
+    // Sessions live in the bridge, tabs in the extension: join them so `ff tabs`
+    // shows which tabs other sessions own. Best-effort, a listing still prints.
+    async function withSessionOwners(tabs, profile) {
+      let sessions = [];
+      try {
+        ({ sessions = [] } = await dispatch(settings, token, deps.fetchFn, "session_list", {}, parsed.flags.timeout, {}));
+      } catch {
+        return tabs;
+      }
+      const live = sessions.filter((s) => s.live && (!profile || s.profile === profile));
+      return tabs.map((t) => {
+        const owner = live.find((s) => s.tabId === t.id);
+        return owner ? { ...t, session: owner.name } : t;
+      });
+    }
+
     // `ff tabs` with no explicit --profile, against a bridge juggling several
     // connected profiles: the tool call comes back PROFILE_REQUIRED, so fan
     // the summary out across every connected profile instead of surfacing
@@ -329,7 +354,7 @@ export async function runCli(argv, overrides = {}) {
         const jsonProfiles = [];
         for (const p of profiles) {
           const summary = await dispatch(settings, token, deps.fetchFn, "get_tabs_summary", {}, parsed.flags.timeout, { profile: p.name });
-          jsonProfiles.push({ name: p.name, tabs: summary?.tabs ?? [] });
+          jsonProfiles.push({ name: p.name, tabs: await withSessionOwners(summary?.tabs ?? [], p.name) });
         }
         deps.stdout(`${JSON.stringify({ profiles: jsonProfiles }, null, 2)}\n`);
         return;
@@ -337,7 +362,7 @@ export async function runCli(argv, overrides = {}) {
       const blocks = [];
       for (const p of profiles) {
         const summary = await dispatch(settings, token, deps.fetchFn, "get_tabs_summary", {}, parsed.flags.timeout, { profile: p.name });
-        const lines = (summary?.tabs ?? []).map((t) => `${t.id}${t.active ? "*" : " "}  ${t.title ?? ""} — ${t.url ?? ""}`);
+        const lines = (await withSessionOwners(summary?.tabs ?? [], p.name)).map(formatTab);
         blocks.push(`[${p.name}]\n${lines.join("\n")}`);
       }
       deps.stdout(`${blocks.join("\n\n")}\n`);
@@ -352,6 +377,13 @@ export async function runCli(argv, overrides = {}) {
           throw new CliError(`no matching element (${JSON.stringify(parsed.steps[0].args)})`);
         }
         prev = await dispatch(settings, token, deps.fetchFn, step.tool, args, parsed.flags.timeout, envelope);
+        // A missed pointer action stops the composite here: the next step, or
+        // the caller, would otherwise carry on as if it landed.
+        const verb = POINTER_DONE[step.tool];
+        if (verb && prev?.[verb] === false) {
+          const hint = prev.hit ? ` (covered by ${prev.hit}; no events sent, --at X,Y acts on whatever is there)` : "";
+          throw new CliError(`${parsed.command} failed at (${prev.x}, ${prev.y}): ${prev.reason}${hint}`);
+        }
         results.push({ tool: step.tool, result: prev });
       }
     } catch (err) {
@@ -378,6 +410,10 @@ export async function runCli(argv, overrides = {}) {
           : `session ${bound.name} → tab ${bound.tabId} (profile ${bound.profile})\n`,
       );
       return 0;
+    }
+
+    if (parsed.command === "tabs" && results[0].result?.tabs) {
+      results[0].result.tabs = await withSessionOwners(results[0].result.tabs, parsed.flags.profile);
     }
 
     if (parsed.command === "screenshot") {

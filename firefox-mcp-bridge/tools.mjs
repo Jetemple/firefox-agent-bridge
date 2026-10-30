@@ -17,6 +17,17 @@ const tabId = z
   .describe("Optional: tab ID. Defaults to the agent tab (the one navigate drives); the active tab before the first navigate.")
   .optional();
 
+// Coordinates are relative to `frameId`'s viewport. Pass find_element's frameId
+// and ref straight through to the pointer tools.
+const frameId = z
+  .number()
+  .describe("Optional: find_element's frameId. x/y are then relative to that iframe.")
+  .optional();
+const ref = z
+  .string()
+  .describe("Optional: find_element's ref. Fails instead of acting if another element covers the target.")
+  .optional();
+
 export const TOOLS = [
   {
     name: "ping_firefox",
@@ -76,7 +87,7 @@ export const TOOLS = [
   },
   {
     name: "get_page_text",
-    description: "Extract visible text content from the page.",
+    description: "Extract visible text content from the page, including open and closed shadow roots and iframes.",
     inputSchema: {
       tabId,
       maxLength: z
@@ -90,11 +101,13 @@ export const TOOLS = [
   {
     name: "click",
     description:
-      "Click at coordinates (x, y) on the current page. Coordinates are viewport-relative pixels.",
+      "Click at coordinates (x, y) on the current page. Coordinates are viewport-relative pixels. A point over an iframe clicks inside it. clicked: true means events were dispatched, not that the page reacted.",
     inputSchema: {
       tabId,
       x: z.number().describe("X coordinate in viewport pixels"),
       y: z.number().describe("Y coordinate in viewport pixels"),
+      frameId,
+      ref,
     },
   },
   {
@@ -199,6 +212,8 @@ export const TOOLS = [
       tabId,
       x: z.number().describe("X coordinate in viewport pixels"),
       y: z.number().describe("Y coordinate in viewport pixels"),
+      frameId,
+      ref,
     },
   },
   {
@@ -208,6 +223,8 @@ export const TOOLS = [
       tabId,
       x: z.number().describe("X coordinate in viewport pixels"),
       y: z.number().describe("Y coordinate in viewport pixels"),
+      frameId,
+      ref,
     },
   },
   {
@@ -217,6 +234,8 @@ export const TOOLS = [
       tabId,
       x: z.number().describe("X coordinate in viewport pixels"),
       y: z.number().describe("Y coordinate in viewport pixels"),
+      frameId,
+      ref,
     },
   },
   {
@@ -256,12 +275,12 @@ export const TOOLS = [
   {
     name: "find_element",
     description:
-      "Find the first visible element matching a CSS selector and/or visible text, returning its center (x, y) so you can click/hover it. Provide selector, text, or both.",
+      "Find the first visible element matching a CSS selector and/or visible text, returning its center (x, y) so you can click/hover it. Searches shadow roots and iframes; pass the returned frameId and ref to the click/hover call. Provide selector, text, or both.",
     inputSchema: {
       tabId,
       text: z
         .string()
-        .describe("Visible text (or aria-label) to match, case-insensitive.")
+        .describe("Visible text (or aria-label, or placeholder) to match, case-insensitive.")
         .optional(),
       selector: z
         .string()

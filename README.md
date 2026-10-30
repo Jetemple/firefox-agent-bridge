@@ -210,6 +210,12 @@ anything reaches Firefox. `/health` exposes only name/version/pid/startedAt/conn
   read-back (e.g. `get_page_text`) when you need to be sure a step landed.
 - Mouse and keyboard tools dispatch synthetic DOM events: they drive page handlers, not
   native browser chrome.
+- `find_element`, `get_page_text`, the pointer tools, `type` and `press_key` reach into
+  iframes and shadow roots (open and closed). `get_links`, `get_tables`, `javascript_tool`,
+  `drag`, `scroll`, `select_option` and `set_checkbox` stay in the top frame's light DOM.
+- A successful `click` means events were dispatched. A click aimed through `find_element`'s
+  `ref` fails if another element covers the target; `tabHidden: true` flags a background tab,
+  where some pages ignore clicks.
 
 ## Permanent install
 

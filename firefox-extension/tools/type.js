@@ -20,7 +20,14 @@
       return el.tagName.toLowerCase() + id + cls;
     }
 
-    const el = document.activeElement;
+    // activeElement stops at the shadow host, and at the <iframe> holding focus.
+    let el = document.activeElement;
+    for (let root; el && (root = el.openOrClosedShadowRoot ?? el.shadowRoot) && root.activeElement; ) {
+      el = root.activeElement;
+    }
+    if (el && (el.tagName === "IFRAME" || el.tagName === "FRAME")) {
+      return { descend: { frameId: browser.runtime.getFrameId(el) } };
+    }
     if (!el || el === document.body || el === document.documentElement) {
       return { typed: false, reason: "no focused editable element" };
     }
@@ -56,6 +63,6 @@
   FF.injected.performType = performType;
 
   FF.tools.type = async (args, tab) => {
-    return FF.inject(tab.id, performType, [args.text, Boolean(args.clearFirst)]);
+    return FF.injectDescending(tab.id, performType, [args.text, Boolean(args.clearFirst)]);
   };
 }

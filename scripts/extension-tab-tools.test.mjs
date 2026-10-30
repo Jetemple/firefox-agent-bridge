@@ -23,6 +23,7 @@ const TAB_FILES = [
   "tools/tabs-summary.js",
   "tools/screenshot.js",
   "tools/find-element.js",
+  "tools/get-page-text.js",
 ];
 
 // Handlers run inside a vm sandbox, so objects they create live in another realm
@@ -154,6 +155,49 @@ test("find_element rejects a call with neither text nor selector", async () => {
   for (const args of [{}, { text: "" }, { selector: "" }]) {
     await assert.rejects(FF.tools.find_element(args, { id: 1 }), (err) => err.code === "INVALID_ARGS");
   }
+});
+
+test("find_element looks in child frames only after the top frame misses, and names the frame", async () => {
+  const FF = loadTabTools({});
+  const miss = { found: false, count: 1, hidden: 1 };
+  FF.inject = async () => miss;
+  FF.injectChildFrames = async () => [
+    { frameId: 5, result: { found: false, count: 2, hidden: 2 } },
+    { frameId: 6, result: { found: true, count: 1, x: 3, y: 4, ref: "r" } },
+  ];
+  const res = await FF.tools.find_element({ text: "Send" }, { id: 1 });
+  assert.equal(res.found, true);
+  assert.equal(res.frameId, 6);
+
+  FF.injectChildFrames = async () => [{ frameId: 5, result: { found: false, count: 2, hidden: 2 } }];
+  const none = await FF.tools.find_element({ text: "Send" }, { id: 1 });
+  assert.equal(none.found, false);
+  assert.equal(none.count, 3);
+  assert.equal(none.hidden, 3);
+
+  FF.inject = async () => ({ found: true, count: 1 });
+  FF.injectChildFrames = async () => {
+    throw new Error("must not search frames after a top-frame hit");
+  };
+  assert.equal((await FF.tools.find_element({ text: "Send" }, { id: 1 })).found, true);
+});
+
+test("get_page_text joins frame text under headers and applies maxLength to the whole", async () => {
+  const FF = loadTabTools({});
+  FF.inject = async () => ({ text: "top", truncated: false, length: 3 });
+  FF.injectChildFrames = async () => [
+    { frameId: 5, result: { text: "chat", truncated: false, length: 4, url: "https://x/chat" } },
+    { frameId: 6, result: { text: "   ", truncated: false, length: 3, url: "https://x/ad" } },
+  ];
+  const all = await FF.tools.get_page_text({}, { id: 1 });
+  assert.equal(all.text, "top\n\n[frame: https://x/chat]\nchat");
+  assert.equal(all.truncated, false);
+  assert.equal(all.length, all.text.length);
+
+  const cut = await FF.tools.get_page_text({ maxLength: 10 }, { id: 1 });
+  assert.equal(cut.text.length, 10);
+  assert.equal(cut.truncated, true);
+  assert.equal(cut.length, all.text.length);
 });
 
 test("back and forward drive tabs.goBack / tabs.goForward", async () => {

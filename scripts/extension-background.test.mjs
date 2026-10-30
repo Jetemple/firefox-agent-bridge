@@ -682,3 +682,44 @@ test("a tool on a just-opened about:blank tab waits for its page, then explains 
   assert.equal(err.code, "RESTRICTED_URL");
   assert.match(err.message, /Tab 12 hasn't started loading/);
 });
+
+test("injectChildFrames drops the top frame, errors and nulls, and survives a failed call", async () => {
+  const { FF, sandbox } = loadWithTools();
+  sandbox.browser.scripting = {
+    executeScript: async (opts) => {
+      assert.equal(opts.target.allFrames, true);
+      assert.equal(opts.injectImmediately, true);
+      return [
+        { frameId: 9, result: "b" },
+        { frameId: 0, result: "top" },
+        { frameId: 3, result: "a" },
+        { frameId: 4, error: new Error("nope") },
+        { frameId: 5, result: null },
+      ];
+    },
+  };
+  const got = await FF.injectChildFrames(1, () => {});
+  assert.deepEqual(got.map((r) => r.frameId), [3, 9]);
+  sandbox.browser.scripting.executeScript = async () => {
+    throw new Error("restricted");
+  };
+  assert.equal((await FF.injectChildFrames(1, () => {})).length, 0);
+});
+
+test("injectDescending replays in the named frame with the new args and reports that frame", async () => {
+  const { FF, sandbox } = loadWithTools();
+  const calls = [];
+  sandbox.browser.scripting = {
+    executeScript: async ({ target, args }) => {
+      calls.push([target.frameIds?.[0] ?? null, args[0]]);
+      return target.frameIds ? [{ result: { clicked: true } }] : [{ result: { descend: { frameId: 8, args: ["inner"] } } }];
+    },
+  };
+  const res = await FF.injectDescending(1, () => {}, ["outer"]);
+  assert.deepEqual(calls, [[null, "outer"], [8, "inner"]]);
+  assert.equal(res.clicked, true);
+  assert.equal(res.frameId, 8);
+
+  sandbox.browser.scripting.executeScript = async () => [{ result: { descend: { frameId: 8 } } }];
+  await assert.rejects(FF.injectDescending(1, () => {}, []), (err) => err.code === "SCRIPT_FAILED");
+});

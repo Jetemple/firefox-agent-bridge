@@ -224,7 +224,14 @@ function pointerStep(tool, flags) {
   return {
     tool,
     buildArgs: (found) =>
-      found && found.found ? withTab({ x: found.x, y: found.y }, flags) : null,
+      found && found.found
+        ? withTab({
+            x: found.x,
+            y: found.y,
+            ...(found.ref ? { ref: found.ref } : {}),
+            ...(found.frameId ? { frameId: found.frameId } : {}),
+          }, flags)
+        : null,
   };
 }
 
@@ -238,7 +245,7 @@ const LIFECYCLE = new Set(["status", "start", "stop", "ping"]);
 // Global flags are legal BEFORE the command too (`ff -s research text`).
 // Consume leading globals, then hand the remainder to the command parser;
 // tokenize() already accepts them after the command.
-function splitLeadingGlobals(argv) {
+export function splitLeadingGlobals(argv) {
   const globals = [];
   let i = 0;
   while (i < argv.length) {
@@ -333,15 +340,20 @@ export function parseCli(argv) {
   }
 }
 
+// One `ff tabs` line. [name] is the session that owns the tab, [opened] a tab an
+// agent opened without naming a session: both are someone's work in progress.
+export function formatTab(t) {
+  const owner = t.session ? `[${t.session}] ` : t.opened && !t.agent ? "[opened] " : "";
+  return `${t.id}${t.active ? "*" : " "}  ${t.agent ? "🤖 " : ""}${owner}${t.title ?? ""} — ${t.url ?? ""}`;
+}
+
 export function formatResult(command, results, { json = false } = {}) {
   const last = results[results.length - 1]?.result;
   if (json) return JSON.stringify(last, null, 2);
   switch (command) {
     case "tabs": {
       const tabs = last?.tabs ?? [];
-      return tabs
-        .map((t) => `${t.id}${t.active ? "*" : " "}  ${t.agent ? "🤖 " : ""}${t.title ?? ""} — ${t.url ?? ""}`)
-        .join("\n");
+      return tabs.map(formatTab).join("\n");
     }
     case "text":
       return typeof last?.text === "string" ? last.text : JSON.stringify(last, null, 2);
@@ -353,7 +365,7 @@ export function formatResult(command, results, { json = false } = {}) {
     }
     case "find":
       return last?.found
-        ? `found ${last.element} "${last.text}" at (${last.x}, ${last.y})${last.count > 1 ? ` (+${last.count - 1} more matches)` : ""}`
+        ? `found ${last.element} "${last.text}" at (${last.x}, ${last.y})${last.frameId ? ` in frame ${last.frameId}` : ""}${last.count > 1 ? ` (+${last.count - 1} more matches)` : ""}`
         : "not found";
     case "links": {
       const links = last?.links ?? [];
@@ -419,7 +431,11 @@ Act:     ff click <query> [--css SEL] | --at X,Y     (also: hover, dblclick, rcl
 Commands run in the agent tab (🤖), a background tab \`ff nav\` opens and reuses —
 your view never switches. --here targets the tab you're viewing instead;
 \`ff tab activate\` brings the agent tab into view.
-<query> matches visible text/aria-label (find_element); add --css to scope.
+<query> matches visible text/aria-label/placeholder (find_element), in iframes and
+shadow roots too; add --css to scope. A click whose target is covered fails without
+clicking; --at X,Y clicks whatever is at that point. "tabHidden" in a result means
+the tab was in the background, where some pages ignore clicks.
+Tabs:    [name] marks a tab another session owns, [opened] one an agent opened.
 Global:  --tab N   --here   -s NAME   --profile P   --json   --timeout MS   --no-autostart
          --wait-for <css> [--wait-timeout MS]   poll until an element appears
 js prints string results raw; add --json for the full value as JSON. Results past
