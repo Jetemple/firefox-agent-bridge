@@ -38,7 +38,13 @@ export const TOOLS = [
   {
     name: "get_tabs_summary",
     description:
-      "Returns a summary of all open browser tabs (id, url, title, active, pinned, windowId; agent: true marks the agent tab).",
+      "Returns a summary of all open browser tabs (id, url, title, active, pinned, windowId; agent: true marks the agent tab; container names the Firefox container a tab is in).",
+    inputSchema: undefined,
+  },
+  {
+    name: "get_containers",
+    description:
+      "Lists the Firefox containers (name, cookieStoreId, color, icon). Pass a name to open_tab's container to open a tab in it.",
     inputSchema: undefined,
   },
   {
@@ -67,6 +73,11 @@ export const TOOLS = [
         .string()
         .regex(SESSION_NAME_RE)
         .describe("Short name shown in the tab strip as \"🤖 label · title\".")
+        .optional(),
+      container: z
+        .string()
+        .min(1)
+        .describe("Optional: Firefox container to open the tab in, by name (case-insensitive) or cookieStoreId. See get_containers.")
         .optional(),
     },
   },

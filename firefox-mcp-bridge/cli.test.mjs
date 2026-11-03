@@ -624,6 +624,33 @@ test("ff open --as binds a session after opening and prints the binding", async 
   assert.match(c.out.join(""), /session research → tab 55 \(profile work\)/);
 });
 
+test("ff open --container on an extension without container support fails before opening anything", async () => {
+  const c = await stubOwnerContext({
+    results: {
+      get_containers: { error: { code: "UNKNOWN_TOOL", message: "Unknown tool: get_containers" } },
+      open_tab: { tabId: 55, windowId: 2, url: "https://x.com" },
+    },
+  });
+  const code = await runCli(["open", "https://x.com", "--container", "Gmail"], c.overrides);
+  assert.equal(code, 1);
+  assert.deepEqual(c.dispatchBodies.map((b) => b.tool), ["get_containers"]);
+  assert.match(c.err.join(""), /predates container support: reload it/);
+});
+
+test("ff open --container --as prints the container the session's tab landed in", async () => {
+  const c = await stubOwnerContext({
+    results: {
+      get_containers: { containers: [{ name: "Gmail", cookieStoreId: "firefox-container-7" }] },
+      open_tab: { tabId: 55, windowId: 2, url: "https://mail.google.com", container: "Gmail" },
+      session_bind: { name: "mail", profile: "default", tabId: 55, url: "https://mail.google.com", previous: null },
+    },
+  });
+  const code = await runCli(["open", "mail.google.com", "--container", "Gmail", "--as", "mail"], c.overrides);
+  assert.equal(code, 0);
+  assert.deepEqual(c.dispatchBodies.map((b) => b.tool), ["get_containers", "open_tab", "session_bind"]);
+  assert.match(c.out.join(""), /session mail → tab 55 \(profile default\) in container Gmail/);
+});
+
 test("ff --profile work nav routes the envelope profile", async () => {
   const c = await stubOwnerContext({ results: { navigate: { tabId: 3, url: "https://x.com" } } });
   await runCli(["--profile", "work", "nav", "https://x.com"], c.overrides);

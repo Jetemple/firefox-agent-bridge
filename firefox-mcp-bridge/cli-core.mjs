@@ -173,13 +173,24 @@ const BUILDERS = {
     return [{ tool: "get_tables", args }];
   },
   open: (pos, flags) => {
-    if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--profile P] [--foreground]");
+    if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--container C] [--profile P] [--foreground]");
     const args = { url: pos[0], active: !!flags.foreground };
     // --as names a session; hand it to the extension as the tab-title marker
     // label so the strip shows "🤖 <name> · …". Omitted → emoji-only stamp.
     if (flags.as != null) args.label = flags.as;
+    if ("container" in flags) {
+      if (typeof flags.container !== "string" || !flags.container.trim()) {
+        throw new UsageError("missing value for --container (see ff containers)");
+      }
+      args.container = flags.container;
+      // Preflight: an extension older than 0.2.3 would drop the unknown
+      // container arg and open the page outside the container. It doesn't
+      // know get_containers either, so this fails first and nothing opens.
+      return [{ tool: "get_containers", args: {} }, { tool: "open_tab", args }];
+    }
     return [{ tool: "open_tab", args }];
   },
+  containers: () => [{ tool: "get_containers", args: {} }],
   sessions: () => [{ tool: "session_list", args: {} }],
   session: (pos) => {
     if (pos[0] === "rm" && pos[1]) return [{ tool: "session_remove", args: { name: pos[1] } }];
@@ -342,9 +353,11 @@ export function parseCli(argv) {
 
 // One `ff tabs` line. [name] is the session that owns the tab, [opened] a tab an
 // agent opened without naming a session: both are someone's work in progress.
+// {name} is the Firefox container the tab lives in.
 export function formatTab(t) {
   const owner = t.session ? `[${t.session}] ` : t.opened && !t.agent ? "[opened] " : "";
-  return `${t.id}${t.active ? "*" : " "}  ${t.agent ? "🤖 " : ""}${owner}${t.title ?? ""} — ${t.url ?? ""}`;
+  const container = t.container ? `{${t.container}} ` : "";
+  return `${t.id}${t.active ? "*" : " "}  ${t.agent ? "🤖 " : ""}${owner}${container}${t.title ?? ""} — ${t.url ?? ""}`;
 }
 
 export function formatResult(command, results, { json = false } = {}) {
@@ -387,7 +400,12 @@ export function formatResult(command, results, { json = false } = {}) {
       return `profile named "${last?.name}"`; // set_profile_name result
     }
     case "open":
-      return `tab ${last?.tabId}`;
+      return `tab ${last?.tabId}${last?.container ? ` in container ${last.container}` : ""}`;
+    case "containers": {
+      const containers = last?.containers ?? [];
+      if (!containers.length) return "no containers (none exist, or containers are turned off in this profile)";
+      return containers.map((c) => `${c.name}  ${c.cookieStoreId}  ${c.color ?? ""}`.trimEnd()).join("\n");
+    }
     case "tab": {
       if (!Array.isArray(last?.closed)) return JSON.stringify(last, null, 2);
       const kept = last.kept?.length ? ` (left ${last.kept.join(", ")} open: you're viewing it)` : "";
@@ -414,7 +432,8 @@ Bridge:  ff status | start [--replace] | stop | ping
 Tabs:    ff tabs                        ff tab close|activate [--tab N]
          ff tab close --mine [--dry-run]  close every tab the agent opened
          ff nav <url> [--tab N]         ff reload [--hard] | back | forward
-         ff open <url> [--as NAME] [--foreground]
+         ff open <url> [--as NAME] [--container C] [--foreground]
+         ff containers                  list containers (by name or id for --container)
 Session: ff sessions | ff session rm NAME | ff bind NAME --tab N
          ff -s NAME <command>           any tab command runs against the session
 Profile: ff profiles | ff profiles name [OLD] NEW | ff --profile P <command>
@@ -435,7 +454,8 @@ your view never switches. --here targets the tab you're viewing instead;
 shadow roots too; add --css to scope. A click whose target is covered fails without
 clicking; --at X,Y clicks whatever is at that point. "tabHidden" in a result means
 the tab was in the background, where some pages ignore clicks.
-Tabs:    [name] marks a tab another session owns, [opened] one an agent opened.
+Tabs:    [name] marks a tab another session owns, [opened] one an agent opened,
+         {name} its container. ff open --container C --as S, then ff -s S <cmd>.
 Global:  --tab N   --here   -s NAME   --profile P   --json   --timeout MS   --no-autostart
          --wait-for <css> [--wait-timeout MS]   poll until an element appears
 js prints string results raw; add --json for the full value as JSON. Results past

@@ -349,6 +349,7 @@ const NO_TAB = new Set([
   "forward",
   "set_profile_name",
   "open_tab",
+  "get_containers",
 ]);
 // Tools that need the resolved tab (for windowId/activation) but are allowed on
 // restricted URLs (captureVisibleTab does not inject script).

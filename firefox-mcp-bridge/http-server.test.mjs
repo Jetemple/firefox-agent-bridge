@@ -182,6 +182,14 @@ test("validateDispatchBody passes open_tab's marker label through (ff open --as)
   assert.equal(validateDispatchBody({ tool: "open_tab", args: { url: "x.com", label: "Bad Name" } }).ok, false);
 });
 
+test("validateDispatchBody passes open_tab's container through and accepts get_containers", () => {
+  const r = validateDispatchBody({ tool: "open_tab", args: { url: "x.com", container: "Gmail" } });
+  assert.equal(r.ok, true);
+  assert.equal(r.args.container, "Gmail");
+  assert.equal(validateDispatchBody({ tool: "open_tab", args: { url: "x.com", container: "" } }).ok, false);
+  assert.equal(validateDispatchBody({ tool: "get_containers" }).ok, true);
+});
+
 test("validateDispatchBody defaults args to {} for no-schema tools", () => {
   const r = validateDispatchBody({ tool: "get_tabs_summary" });
   assert.equal(r.ok, true);

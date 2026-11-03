@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseCli, formatResult, usageText } from "./cli-core.mjs";
+import { parseCli, formatResult, formatTab, usageText } from "./cli-core.mjs";
 import { WS_TOOL_NAMES } from "./tools.mjs";
 
 function steps(argv) {
@@ -287,6 +287,31 @@ test("open builds open_tab; --foreground activates; --as passes the label to the
   assert.deepEqual(bg.steps, [{ tool: "open_tab", args: { url: "https://x.com", active: false } }]);
 });
 
+test("open --container passes the container through; a bare --container is a usage error", () => {
+  const p = parseCli(["open", "mail.google.com", "--container", "Gmail", "--as", "mail"]);
+  // get_containers runs first so an extension without container support fails
+  // before any tab opens, instead of opening it outside the container.
+  assert.deepEqual(p.steps, [
+    { tool: "get_containers", args: {} },
+    { tool: "open_tab", args: { url: "mail.google.com", active: false, label: "mail", container: "Gmail" } },
+  ]);
+  assert.match(parseCli(["open", "x.com", "--container"]).error, /--container/);
+  assert.match(parseCli(["open", "x.com", "--container", " "]).error, /--container/);
+});
+
+test("containers lists them; open and tabs show the container", () => {
+  assert.deepEqual(parseCli(["containers"]).steps, [{ tool: "get_containers", args: {} }]);
+  const list = formatResult("containers", [{ result: { containers: [
+    { name: "Personal", cookieStoreId: "firefox-container-1", color: "blue" },
+    { name: "Gmail", cookieStoreId: "firefox-container-7", color: "red" },
+  ] } }]);
+  assert.equal(list, "Personal  firefox-container-1  blue\nGmail  firefox-container-7  red");
+  assert.match(formatResult("containers", [{ result: { containers: [] } }]), /no containers/);
+  assert.equal(formatResult("open", [{ result: { tabId: 5, container: "Gmail" } }]), "tab 5 in container Gmail");
+  assert.equal(formatResult("open", [{ result: { tabId: 5 } }]), "tab 5");
+  assert.equal(formatTab({ id: 9, title: "Inbox", url: "u", container: "Gmail" }), "9   {Gmail} Inbox — u");
+});
+
 test("sessions / session rm / bind / profiles build the pseudo-tool steps", () => {
   assert.deepEqual(parseCli(["sessions"]).steps, [{ tool: "session_list", args: {} }]);
   assert.deepEqual(parseCli(["session", "rm", "research"]).steps, [{ tool: "session_remove", args: { name: "research" } }]);
@@ -333,7 +358,7 @@ test("every WS tool is reachable through some CLI command", () => {
     ["tab", "close"], ["tab", "activate", "--tab", "1"], ["reload"], ["back"], ["forward"],
     ["key", "Enter"], ["scroll", "--dy", "1"], ["click", "q"], ["dblclick", "q"], ["rclick", "q"], ["hover", "q"],
     ["drag", "--from", "1,2", "--to", "3,4"], ["select", "#s", "v"], ["check", "#c"],
-    ["find", "q"], ["links"], ["tables"], ["open", "https://x.com"],
+    ["find", "q"], ["links"], ["tables"], ["open", "https://x.com"], ["containers"],
   ];
   for (const argv of invocations) {
     const p = parseCli(argv);
@@ -351,7 +376,7 @@ test("usageText is one screen and mentions every command", () => {
   for (const cmd of ["tabs", "nav", "text", "screenshot", "click", "type", "key", "scroll", "drag",
                      "select", "check", "uncheck", "find", "links", "tables", "js", "tab", "reload",
                      "back", "forward", "status", "start", "stop", "ping",
-                     "open", "sessions", "session", "bind", "profiles"]) {
+                     "open", "sessions", "session", "bind", "profiles", "containers", "--container"]) {
     assert.ok(u.includes(cmd), `usage missing: ${cmd}`);
   }
 });

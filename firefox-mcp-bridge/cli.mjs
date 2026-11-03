@@ -376,7 +376,14 @@ export async function runCli(argv, overrides = {}) {
         if (args == null) {
           throw new CliError(`no matching element (${JSON.stringify(parsed.steps[0].args)})`);
         }
-        prev = await dispatch(settings, token, deps.fetchFn, step.tool, args, parsed.flags.timeout, envelope);
+        try {
+          prev = await dispatch(settings, token, deps.fetchFn, step.tool, args, parsed.flags.timeout, envelope);
+        } catch (err) {
+          if (step.tool === "get_containers" && /^UNKNOWN_TOOL:/.test(err?.message ?? "")) {
+            throw new CliError("the Firefox extension predates container support: reload it (0.2.3+) and retry");
+          }
+          throw err;
+        }
         // A missed pointer action stops the composite here: the next step, or
         // the caller, would otherwise carry on as if it landed.
         const verb = POINTER_DONE[step.tool];
@@ -407,7 +414,7 @@ export async function runCli(argv, overrides = {}) {
       deps.stdout(
         parsed.flags.json
           ? `${JSON.stringify(bound, null, 2)}\n`
-          : `session ${bound.name} → tab ${bound.tabId} (profile ${bound.profile})\n`,
+          : `session ${bound.name} → tab ${bound.tabId} (profile ${bound.profile})${opened.container ? ` in container ${opened.container}` : ""}\n`,
       );
       return 0;
     }

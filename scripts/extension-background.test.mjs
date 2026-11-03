@@ -8,6 +8,7 @@ import { createContext, runInContext } from "node:vm";
 const SOURCE = readFileSync(new URL("../firefox-extension/background.js", import.meta.url), "utf8");
 const NAVIGATE_SOURCE = readFileSync(new URL("../firefox-extension/tools/navigate.js", import.meta.url), "utf8");
 const OPEN_TAB_SOURCE = readFileSync(new URL("../firefox-extension/tools/open-tab.js", import.meta.url), "utf8");
+const CONTAINERS_SOURCE = readFileSync(new URL("../firefox-extension/tools/containers.js", import.meta.url), "utf8");
 const RESTRICTED_SOURCE = readFileSync(new URL("../firefox-extension/restricted.js", import.meta.url), "utf8");
 const MARKER_SOURCE = readFileSync(new URL("../firefox-extension/marker.js", import.meta.url), "utf8");
 
@@ -83,7 +84,7 @@ function loadBackground({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
   return { FF: sandbox.FFBridge, stored };
 }
 
-function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
+function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor, contextualIdentities } = {}) {
   const listeners = () => ({ addListener: () => {} });
   const stored = { ...storageData };
   const sandbox = {
@@ -114,6 +115,7 @@ function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
       },
       alarms: { create: () => {}, onAlarm: listeners() },
       tabs,
+      ...(contextualIdentities ? { contextualIdentities } : {}),
     },
   };
   createContext(sandbox);
@@ -123,6 +125,7 @@ function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
   runInContext(MARKER_SOURCE, sandbox, { filename: "marker.js" });
   runInContext(SOURCE, sandbox, { filename: "background.js" });
   runInContext(NAVIGATE_SOURCE, sandbox, { filename: "navigate.js" });
+  runInContext(CONTAINERS_SOURCE, sandbox, { filename: "containers.js" });
   runInContext(OPEN_TAB_SOURCE, sandbox, { filename: "open-tab.js" });
   // `sandbox` is the vm's global: setting sandbox.document lets a test drive
   // FF.pageStamp, whose free `document` reference resolves to it.
@@ -267,6 +270,101 @@ test("open_tab activates only when asked", async () => {
   });
   await FF.tools.open_tab({ url: "https://x.com", active: true });
   assert.equal(created[0].active, true);
+});
+
+// --- containers ------------------------------------------------------------
+
+const CONTAINERS = [
+  { name: "Personal", cookieStoreId: "firefox-container-1", color: "blue", icon: "fingerprint" },
+  { name: "Gmail", cookieStoreId: "firefox-container-7", color: "red", icon: "circle" },
+];
+const identities = (list = CONTAINERS) => ({ query: async () => list });
+
+test("open_tab --container opens the tab in that container, matched by name case-insensitively", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(),
+    tabs: {
+      create: async (opts) => (created.push(opts), { id: 55, windowId: 2, cookieStoreId: opts.cookieStoreId }),
+    },
+  });
+  const result = await FF.tools.open_tab({ url: "mail.google.com", container: "gmail" });
+  assert.equal(created[0].cookieStoreId, "firefox-container-7");
+  assert.equal(created[0].active, false);
+  assert.equal(result.container, "Gmail");
+});
+
+test("open_tab --container accepts a cookieStoreId", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(),
+    tabs: { create: async (opts) => (created.push(opts), { id: 5, windowId: 1, cookieStoreId: opts.cookieStoreId }) },
+  });
+  await FF.tools.open_tab({ url: "x.com", container: "firefox-container-1" });
+  assert.equal(created[0].cookieStoreId, "firefox-container-1");
+});
+
+test("open_tab with an unknown container fails listing the real ones, and opens nothing", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(),
+    tabs: { create: async (opts) => (created.push(opts), { id: 1, windowId: 1 }) },
+  });
+  await assert.rejects(FF.tools.open_tab({ url: "x.com", container: "Work" }), (err) => {
+    assert.equal(err.code, "INVALID_ARGS");
+    assert.match(err.message, /No container named "Work"\. Containers: Personal, Gmail/);
+    return true;
+  });
+  assert.equal(created.length, 0);
+});
+
+test("open_tab with a container fails clearly when containers are turned off", async () => {
+  const { FF } = loadWithTools({
+    contextualIdentities: { query: async () => { throw new Error("Contextual identities are currently disabled"); } },
+    tabs: { create: async () => assert.fail("must not open a tab") },
+  });
+  await assert.rejects(FF.tools.open_tab({ url: "x.com", container: "Gmail" }), /containers are turned off/);
+});
+
+test("open_tab refuses an ambiguous container name", async () => {
+  const dupes = [...CONTAINERS, { name: "gmail", cookieStoreId: "firefox-container-9" }];
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(dupes),
+    tabs: { create: async () => assert.fail("must not open a tab") },
+  });
+  await assert.rejects(FF.tools.open_tab({ url: "x.com", container: "Gmail" }), /firefox-container-7, firefox-container-9/);
+});
+
+test("open_tab reports the container the tab really landed in, not the one asked for", async () => {
+  // A Multi-Account Containers "always open in" rule can move the tab.
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(),
+    tabs: { create: async () => ({ id: 3, windowId: 1, cookieStoreId: "firefox-container-1" }) },
+  });
+  const result = await FF.tools.open_tab({ url: "x.com", container: "Gmail" });
+  assert.equal(result.container, "Personal");
+});
+
+test("open_tab without a container adds no cookieStoreId and no container field", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(),
+    tabs: { create: async (opts) => (created.push(opts), { id: 4, windowId: 1, cookieStoreId: "firefox-default" }) },
+  });
+  const result = await FF.tools.open_tab({ url: "x.com" });
+  assert.equal("cookieStoreId" in created[0], false);
+  assert.equal("container" in result, false);
+});
+
+test("get_containers lists name, id, color and icon", async () => {
+  const { FF } = loadWithTools({ contextualIdentities: identities() });
+  const res = await FF.tools.get_containers({});
+  assert.deepEqual(JSON.parse(JSON.stringify(res)), { containers: CONTAINERS });
+});
+
+test("get_containers answers an empty list when containers are off or the API is missing", async () => {
+  const { FF } = loadWithTools();
+  assert.deepEqual(JSON.parse(JSON.stringify(await FF.tools.get_containers({}))), { containers: [] });
 });
 
 // --- tab marker ------------------------------------------------------------

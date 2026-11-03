@@ -14,6 +14,7 @@ const EXT = resolve(dirname(fileURLToPath(import.meta.url)), "../firefox-extensi
 const TAB_FILES = [
   "restricted.js",
   "marker.js",
+  "tools/containers.js",
   "tools/close-tab.js",
   "tools/close-agent-tabs.js",
   "tools/activate-tab.js",
@@ -123,6 +124,21 @@ test("get_tabs_summary flags only the agent tab with agent: true", async () => {
   const res = await FF.tools.get_tabs_summary();
   assert.equal("agent" in res.tabs[0], false);
   assert.equal(res.tabs[1].agent, true);
+});
+
+test("get_tabs_summary names the container of tabs inside one, and only those", async () => {
+  const FF = loadTabTools({
+    contextualIdentities: { query: async () => [{ name: "Gmail", cookieStoreId: "firefox-container-7" }] },
+    tabs: {
+      query: async () => [
+        { id: 1, url: "https://mail.google.com", title: "Inbox", cookieStoreId: "firefox-container-7", windowId: 1 },
+        { id: 2, url: "https://x.com", title: "X", cookieStoreId: "firefox-default", windowId: 1 },
+      ],
+    },
+  });
+  const res = await FF.tools.get_tabs_summary();
+  assert.equal(res.tabs[0].container, "Gmail");
+  assert.equal("container" in res.tabs[1], false);
 });
 
 test("screenshot captures a background tab in place — no tab activation, no window focus", async () => {

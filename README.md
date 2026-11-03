@@ -74,6 +74,16 @@ do this to sites they assign to a container. `ff` follows the swap, and
 viewing (`--dry-run` lists them first). It only knows about tabs opened since
 the extension last started, and it covers every agent's tabs, not just yours.
 
+### Containers
+
+`ff containers` lists your Firefox containers. `ff open <url> --container
+Gmail` opens the page in one, matched by name (case-insensitive) or by its
+`firefox-container-N` id; an unknown name fails without opening anything.
+The reply names the container the tab actually landed in, since an "always
+open in" rule can move it. `ff tabs` marks container tabs `{Gmail}`. An open
+tab can't change containers, so to keep working in one, name a session:
+`ff open <url> --container Gmail --as mail`, then `ff -s mail <command>`.
+
 ## Sessions & profiles
 
 Multiple agents (or one agent juggling tabs) can each pin a named session to a
