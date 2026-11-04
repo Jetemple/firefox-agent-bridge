@@ -219,6 +219,96 @@ test("ff js -f <file> loads code from a file instead of argv", async () => {
   }
 });
 
+test("ff -s NAME js -f <file> loads the file with leading globals (regression: -f sent as code)", async () => {
+  const owner = await stubOwner({ results: { javascript_tool: { result: { result: "ok" } } } });
+  const c = ctx(owner);
+  const script = join(c.dir, "extract.js");
+  writeFileSync(script, "1 + 1");
+  try {
+    const code = await runCli(["-s", "mine", "js", "-f", script], c.opts);
+    assert.equal(code, 0);
+    const call = owner.requests.find((r) => r.body.tool === "javascript_tool");
+    assert.equal(call.body.args.code, "1 + 1");
+    assert.equal(call.body.session, "mine");
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff click passes find_element's ref and frameId through, and a covered target exits 1", async () => {
+  const hit = await stubOwner({
+    results: {
+      find_element: { result: { found: true, element: "a", text: "Go", x: 9, y: 8, count: 1, ref: "r1", frameId: 77 } },
+      click: { result: { clicked: true, frameId: 77 } },
+    },
+  });
+  const c1 = ctx(hit);
+  try {
+    assert.equal(await runCli(["click", "Go"], c1.opts), 0);
+    assert.deepEqual(hit.requests[1].body.args, { x: 9, y: 8, ref: "r1", frameId: 77 });
+  } finally {
+    await hit.close();
+  }
+
+  const covered = await stubOwner({
+    results: {
+      find_element: { result: { found: true, element: "a", text: "Go", x: 9, y: 8, count: 1, ref: "r1" } },
+      click: { result: { clicked: false, reason: "target covered", hit: "div#cover", x: 9, y: 8 } },
+    },
+  });
+  const c2 = ctx(covered);
+  try {
+    assert.equal(await runCli(["click", "Go"], c2.opts), 1);
+    assert.match(c2.err.join(""), /target covered \(covered by div#cover/);
+  } finally {
+    await covered.close();
+  }
+});
+
+test("ff type stops before typing when its click missed", async () => {
+  const owner = await stubOwner({
+    results: {
+      find_element: { result: { found: true, element: "input", text: "", x: 1, y: 2, count: 1, ref: "r" } },
+      click: { result: { clicked: false, reason: "target covered", hit: "div", x: 1, y: 2 } },
+    },
+  });
+  const c = ctx(owner);
+  try {
+    assert.equal(await runCli(["type", "Email", "me@x.com"], c.opts), 1);
+    assert.deepEqual(owner.requests.map((r) => r.body.tool).filter((t) => t), ["find_element", "click"]);
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff tabs marks the tabs live sessions own", async () => {
+  const owner = await stubOwner({
+    results: {
+      get_tabs_summary: { result: { tabs: [
+        { id: 1, title: "Mine", url: "http://a", opened: true },
+        { id: 2, title: "Gone", url: "http://b" },
+        { id: 3, title: "Unnamed", url: "http://c", opened: true },
+        { id: 4, title: "Agent", url: "http://d", agent: true, opened: true },
+      ] } },
+      session_list: { result: { sessions: [
+        { name: "refund", profile: "default", tabId: 1, live: true },
+        { name: "stale", profile: "default", tabId: 2, live: false },
+      ] } },
+    },
+  });
+  const c = ctx(owner);
+  try {
+    assert.equal(await runCli(["tabs"], c.opts), 0);
+    const lines = c.out.join("").trim().split("\n");
+    assert.match(lines[0], /^1\s+\[refund\] Mine/);
+    assert.match(lines[1], /^2\s+Gone/);
+    assert.match(lines[2], /^3\s+\[opened\] Unnamed/);
+    assert.match(lines[3], /^4\s+🤖 Agent/);
+  } finally {
+    await owner.close();
+  }
+});
+
 test("ff js - reads code from stdin", async () => {
   const owner = await stubOwner({ results: { javascript_tool: { result: { result: "ok" } } } });
   const c = ctx(owner);
@@ -532,6 +622,33 @@ test("ff open --as binds a session after opening and prints the binding", async 
   assert.deepEqual(c.dispatchBodies.map((b) => b.tool), ["open_tab", "session_bind"]);
   assert.deepEqual(c.dispatchBodies[1].args, { name: "research", tabId: 55 });
   assert.match(c.out.join(""), /session research → tab 55 \(profile work\)/);
+});
+
+test("ff open --container on an extension without container support fails before opening anything", async () => {
+  const c = await stubOwnerContext({
+    results: {
+      get_containers: { error: { code: "UNKNOWN_TOOL", message: "Unknown tool: get_containers" } },
+      open_tab: { tabId: 55, windowId: 2, url: "https://x.com" },
+    },
+  });
+  const code = await runCli(["open", "https://x.com", "--container", "Gmail"], c.overrides);
+  assert.equal(code, 1);
+  assert.deepEqual(c.dispatchBodies.map((b) => b.tool), ["get_containers"]);
+  assert.match(c.err.join(""), /predates container support: reload it/);
+});
+
+test("ff open --container --as prints the container the session's tab landed in", async () => {
+  const c = await stubOwnerContext({
+    results: {
+      get_containers: { containers: [{ name: "Gmail", cookieStoreId: "firefox-container-7" }] },
+      open_tab: { tabId: 55, windowId: 2, url: "https://mail.google.com", container: "Gmail" },
+      session_bind: { name: "mail", profile: "default", tabId: 55, url: "https://mail.google.com", previous: null },
+    },
+  });
+  const code = await runCli(["open", "mail.google.com", "--container", "Gmail", "--as", "mail"], c.overrides);
+  assert.equal(code, 0);
+  assert.deepEqual(c.dispatchBodies.map((b) => b.tool), ["get_containers", "open_tab", "session_bind"]);
+  assert.match(c.out.join(""), /session mail → tab 55 \(profile default\) in container Gmail/);
 });
 
 test("ff --profile work nav routes the envelope profile", async () => {

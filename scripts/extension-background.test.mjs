@@ -8,6 +8,7 @@ import { createContext, runInContext } from "node:vm";
 const SOURCE = readFileSync(new URL("../firefox-extension/background.js", import.meta.url), "utf8");
 const NAVIGATE_SOURCE = readFileSync(new URL("../firefox-extension/tools/navigate.js", import.meta.url), "utf8");
 const OPEN_TAB_SOURCE = readFileSync(new URL("../firefox-extension/tools/open-tab.js", import.meta.url), "utf8");
+const CONTAINERS_SOURCE = readFileSync(new URL("../firefox-extension/tools/containers.js", import.meta.url), "utf8");
 const RESTRICTED_SOURCE = readFileSync(new URL("../firefox-extension/restricted.js", import.meta.url), "utf8");
 const MARKER_SOURCE = readFileSync(new URL("../firefox-extension/marker.js", import.meta.url), "utf8");
 
@@ -32,6 +33,17 @@ class FakeWebSocket {
   }
 }
 FakeWebSocket.OPEN = 1;
+
+// The sandbox stubs setTimeout, so FF.sleep would never resolve. Swap in a
+// fake clock that a sleep advances: wait loops (settleTab, awaitReplacement)
+// then run to their deadline instantly instead of hanging the test.
+function fakeClock(FF) {
+  let t = 0;
+  FF.now = () => t;
+  FF.sleep = async (ms) => {
+    t += ms;
+  };
+}
 
 function loadBackground({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
   const listeners = () => ({ addListener: () => {} });
@@ -68,10 +80,11 @@ function loadBackground({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
   };
   createContext(sandbox);
   runInContext(SOURCE, sandbox, { filename: "background.js" });
+  fakeClock(sandbox.FFBridge);
   return { FF: sandbox.FFBridge, stored };
 }
 
-function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
+function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor, contextualIdentities } = {}) {
   const listeners = () => ({ addListener: () => {} });
   const stored = { ...storageData };
   const sandbox = {
@@ -102,6 +115,7 @@ function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
       },
       alarms: { create: () => {}, onAlarm: listeners() },
       tabs,
+      ...(contextualIdentities ? { contextualIdentities } : {}),
     },
   };
   createContext(sandbox);
@@ -111,9 +125,11 @@ function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
   runInContext(MARKER_SOURCE, sandbox, { filename: "marker.js" });
   runInContext(SOURCE, sandbox, { filename: "background.js" });
   runInContext(NAVIGATE_SOURCE, sandbox, { filename: "navigate.js" });
+  runInContext(CONTAINERS_SOURCE, sandbox, { filename: "containers.js" });
   runInContext(OPEN_TAB_SOURCE, sandbox, { filename: "open-tab.js" });
   // `sandbox` is the vm's global: setting sandbox.document lets a test drive
   // FF.pageStamp, whose free `document` reference resolves to it.
+  fakeClock(sandbox.FFBridge);
   return { FF: sandbox.FFBridge, stored, sandbox };
 }
 
@@ -254,6 +270,101 @@ test("open_tab activates only when asked", async () => {
   });
   await FF.tools.open_tab({ url: "https://x.com", active: true });
   assert.equal(created[0].active, true);
+});
+
+// --- containers ------------------------------------------------------------
+
+const CONTAINERS = [
+  { name: "Personal", cookieStoreId: "firefox-container-1", color: "blue", icon: "fingerprint" },
+  { name: "Gmail", cookieStoreId: "firefox-container-7", color: "red", icon: "circle" },
+];
+const identities = (list = CONTAINERS) => ({ query: async () => list });
+
+test("open_tab --container opens the tab in that container, matched by name case-insensitively", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(),
+    tabs: {
+      create: async (opts) => (created.push(opts), { id: 55, windowId: 2, cookieStoreId: opts.cookieStoreId }),
+    },
+  });
+  const result = await FF.tools.open_tab({ url: "mail.google.com", container: "gmail" });
+  assert.equal(created[0].cookieStoreId, "firefox-container-7");
+  assert.equal(created[0].active, false);
+  assert.equal(result.container, "Gmail");
+});
+
+test("open_tab --container accepts a cookieStoreId", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(),
+    tabs: { create: async (opts) => (created.push(opts), { id: 5, windowId: 1, cookieStoreId: opts.cookieStoreId }) },
+  });
+  await FF.tools.open_tab({ url: "x.com", container: "firefox-container-1" });
+  assert.equal(created[0].cookieStoreId, "firefox-container-1");
+});
+
+test("open_tab with an unknown container fails listing the real ones, and opens nothing", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(),
+    tabs: { create: async (opts) => (created.push(opts), { id: 1, windowId: 1 }) },
+  });
+  await assert.rejects(FF.tools.open_tab({ url: "x.com", container: "Work" }), (err) => {
+    assert.equal(err.code, "INVALID_ARGS");
+    assert.match(err.message, /No container named "Work"\. Containers: Personal, Gmail/);
+    return true;
+  });
+  assert.equal(created.length, 0);
+});
+
+test("open_tab with a container fails clearly when containers are turned off", async () => {
+  const { FF } = loadWithTools({
+    contextualIdentities: { query: async () => { throw new Error("Contextual identities are currently disabled"); } },
+    tabs: { create: async () => assert.fail("must not open a tab") },
+  });
+  await assert.rejects(FF.tools.open_tab({ url: "x.com", container: "Gmail" }), /containers are turned off/);
+});
+
+test("open_tab refuses an ambiguous container name", async () => {
+  const dupes = [...CONTAINERS, { name: "gmail", cookieStoreId: "firefox-container-9" }];
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(dupes),
+    tabs: { create: async () => assert.fail("must not open a tab") },
+  });
+  await assert.rejects(FF.tools.open_tab({ url: "x.com", container: "Gmail" }), /firefox-container-7, firefox-container-9/);
+});
+
+test("open_tab reports the container the tab really landed in, not the one asked for", async () => {
+  // A Multi-Account Containers "always open in" rule can move the tab.
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(),
+    tabs: { create: async () => ({ id: 3, windowId: 1, cookieStoreId: "firefox-container-1" }) },
+  });
+  const result = await FF.tools.open_tab({ url: "x.com", container: "Gmail" });
+  assert.equal(result.container, "Personal");
+});
+
+test("open_tab without a container adds no cookieStoreId and no container field", async () => {
+  const created = [];
+  const { FF } = loadWithTools({
+    contextualIdentities: identities(),
+    tabs: { create: async (opts) => (created.push(opts), { id: 4, windowId: 1, cookieStoreId: "firefox-default" }) },
+  });
+  const result = await FF.tools.open_tab({ url: "x.com" });
+  assert.equal("cookieStoreId" in created[0], false);
+  assert.equal("container" in result, false);
+});
+
+test("get_containers lists name, id, color and icon", async () => {
+  const { FF } = loadWithTools({ contextualIdentities: identities() });
+  const res = await FF.tools.get_containers({});
+  assert.deepEqual(JSON.parse(JSON.stringify(res)), { containers: CONTAINERS });
+});
+
+test("get_containers answers an empty list when containers are off or the API is missing", async () => {
+  const { FF } = loadWithTools();
+  assert.deepEqual(JSON.parse(JSON.stringify(await FF.tools.get_containers({}))), { containers: [] });
 });
 
 // --- tab marker ------------------------------------------------------------
@@ -483,4 +594,230 @@ test('navigate with tabId "active" loads the viewed tab and leaves the agent tab
   assert.equal(result.tabId, 3);
   assert.equal(updates[0][0], 3);
   assert.equal(FF.agentTabId, 12);
+});
+
+// --- replaced tabs (container extensions reopen a tab under a new id) -------
+
+test("an agent tab closed right after a sibling opened is followed to that sibling", async () => {
+  const { FF } = loadMarked({ tabs: { create: async () => ({ id: 864, windowId: 3 }) } });
+  await FF.tools.open_tab({ url: "reddit.com", label: "rt" });
+  FF.onTabCreated({ id: 865, windowId: 3 });
+  FF.onTabRemoved(864, { windowId: 3 });
+  assert.equal(FF.followTab(864), 865);
+  assert.equal(FF.markedTabs.get(865), "rt");
+  assert.equal(FF.markedTabs.has(864), false);
+});
+
+test("a replacement that opens just after the close is adopted too", () => {
+  const { FF } = loadWithTools();
+  FF.agentTabId = 20;
+  FF.onTabRemoved(20, { windowId: 1 });
+  FF.onTabCreated({ id: 21, windowId: 1 });
+  assert.equal(FF.followTab(20), 21);
+  assert.equal(FF.agentTabId, 21);
+});
+
+test("openerTabId picks the replacement among several new tabs", () => {
+  const { FF } = loadWithTools();
+  FF.markedTabs.set(30, null);
+  FF.onTabCreated({ id: 31, windowId: 1 });
+  FF.onTabCreated({ id: 32, windowId: 1, openerTabId: 30 });
+  FF.onTabRemoved(30, { windowId: 1 });
+  assert.equal(FF.followTab(30), 32);
+});
+
+test("ambiguous, other-window, unowned and deliberate closes are never followed", () => {
+  const { FF } = loadWithTools();
+  // two candidates, no opener
+  FF.markedTabs.set(40, null);
+  FF.onTabCreated({ id: 41, windowId: 1 });
+  FF.onTabCreated({ id: 42, windowId: 1 });
+  FF.onTabRemoved(40, { windowId: 1 });
+  assert.equal(FF.followTab(40), 40);
+
+  const other = loadWithTools().FF;
+  other.markedTabs.set(50, null);
+  other.onTabCreated({ id: 51, windowId: 2 });
+  other.onTabRemoved(50, { windowId: 1 });
+  assert.equal(other.followTab(50), 50);
+
+  const unowned = loadWithTools().FF;
+  unowned.onTabCreated({ id: 61, windowId: 1 });
+  unowned.onTabRemoved(60, { windowId: 1 });
+  assert.equal(unowned.followTab(60), 60);
+
+  const closed = loadWithTools().FF;
+  closed.markedTabs.set(70, null);
+  closed.expectedCloses.add(70);
+  closed.onTabCreated({ id: 71, windowId: 1 });
+  closed.onTabRemoved(70, { windowId: 1 });
+  assert.equal(closed.followTab(70), 70);
+});
+
+test("a stale new tab outside the window is not adopted", () => {
+  const { FF } = loadWithTools();
+  let t = 1000;
+  FF.now = () => t;
+  FF.markedTabs.set(80, null);
+  FF.onTabCreated({ id: 81, windowId: 1 });
+  t += 5000;
+  FF.onTabRemoved(80, { windowId: 1 });
+  assert.equal(FF.followTab(80), 80);
+});
+
+test("dispatch rewrites a replaced tabId before the tool runs", async () => {
+  FakeWebSocket.instances = [];
+  const updates = [];
+  const { FF } = loadWithTools({
+    WebSocketCtor: FakeWebSocket,
+    tabs: { update: async (id, props) => (updates.push(id), { id }) },
+  });
+  FF.markedTabs.set(90, null);
+  FF.onTabCreated({ id: 91, windowId: 1 });
+  FF.onTabRemoved(90, { windowId: 1 });
+  const sock = FakeWebSocket.instances[0];
+  sock.fire("message", { data: JSON.stringify({ id: "1", tool: "navigate", args: { url: "x.com", tabId: 90 } }) });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(updates, [91]);
+  assert.equal(sock.sent.at(-1).result.tabId, 91);
+});
+
+test("resolveTab waits out the replacement window for a just-orphaned agent tab", async () => {
+  let t = 0;
+  const { FF } = loadWithTools({
+    tabs: { get: async (id) => (id === 101 ? { id: 101, url: "https://x.com" } : Promise.reject(new Error("gone"))) },
+  });
+  FF.now = () => t;
+  FF.sleep = async (ms) => {
+    t += ms;
+    if (t === 300) FF.onTabCreated({ id: 101, windowId: 1 });
+  };
+  FF.agentTabId = 100;
+  FF.onTabRemoved(100, { windowId: 1 });
+  const tab = await FF.resolveTab(undefined);
+  assert.equal(tab.id, 101);
+});
+
+test("open_tab reports the URL the tab actually landed on", async () => {
+  const { FF } = loadWithTools({
+    tabs: {
+      create: async () => ({ id: 55, windowId: 2, url: "about:blank" }),
+      get: async (id) => ({ id, windowId: 2, url: "https://example.com/en/" }),
+    },
+  });
+  const result = await FF.tools.open_tab({ url: "example.com" });
+  assert.equal(result.tabId, 55);
+  assert.equal(result.url, "https://example.com/en/");
+});
+
+test("open_tab reports the replacement when a container extension reopens the tab", async () => {
+  const { FF } = loadWithTools({
+    tabs: {
+      create: async () => ({ id: 70, windowId: 1, url: "about:blank" }),
+      get: async (id) => {
+        if (id === 70) {
+          // The container extension swaps the tab before its page commits.
+          FF.onTabCreated({ id: 71, windowId: 1, openerTabId: 70 });
+          FF.onTabRemoved(70, { windowId: 1 });
+          throw new Error("Invalid tab ID: 70");
+        }
+        return { id, windowId: 1, url: "https://old.reddit.com/r/sportsbook/" };
+      },
+    },
+  });
+  const result = await FF.tools.open_tab({ url: "https://www.reddit.com/r/sportsbook/", label: "rs" });
+  assert.equal(result.tabId, 71);
+  assert.equal(result.url, "https://old.reddit.com/r/sportsbook/");
+  assert.equal(FF.markedTabs.get(71), "rs", "the session label follows the tab");
+});
+
+test("navigate waits for the new page instead of reporting the old one", async () => {
+  let gets = 0;
+  const { FF } = loadWithTools({
+    tabs: {
+      update: async (id) => ({ id, url: "https://before.example/" }),
+      get: async (id) => ({ id, url: ++gets < 3 ? "https://before.example/" : "https://after.example/landed" }),
+    },
+  });
+  const result = await FF.tools.navigate({ url: "https://after.example/", tabId: 9 });
+  assert.deepEqual({ ...result }, { tabId: 9, url: "https://after.example/landed" });
+});
+
+test("navigate falls back to the requested URL when the page never changes", async () => {
+  const { FF } = loadWithTools({
+    tabs: {
+      update: async (id) => ({ id, url: "https://before.example/" }),
+      get: async (id) => ({ id, url: "https://before.example/" }),
+    },
+  });
+  const result = await FF.tools.navigate({ url: "https://files.example/report.pdf", tabId: 9 });
+  assert.equal(result.url, "https://files.example/report.pdf");
+});
+
+test("a tool on a just-opened about:blank tab waits for its page, then explains if it never loads", async () => {
+  FakeWebSocket.instances = [];
+  let url = "about:blank";
+  const { FF } = loadWithTools({
+    WebSocketCtor: FakeWebSocket,
+    tabs: { get: async (id) => ({ id, url, status: "loading" }) },
+  });
+  FF.tools.get_page_text = async (args, tab) => ({ tabId: tab.id, url: tab.url });
+  const sleep = FF.sleep;
+  FF.sleep = async (ms) => {
+    await sleep(ms);
+    if (FF.now() === 500) url = "https://example.com/";
+  };
+  const sock = FakeWebSocket.instances[0];
+  sock.fire("message", { data: JSON.stringify({ id: "1", tool: "get_page_text", args: { tabId: 12 } }) });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(sock.sent.at(-1).result, { tabId: 12, url: "https://example.com/" });
+
+  FF.sleep = sleep;
+  url = "about:blank";
+  sock.fire("message", { data: JSON.stringify({ id: "2", tool: "get_page_text", args: { tabId: 12 } }) });
+  await new Promise((r) => setImmediate(r));
+  const err = sock.sent.at(-1).error;
+  assert.equal(err.code, "RESTRICTED_URL");
+  assert.match(err.message, /Tab 12 hasn't started loading/);
+});
+
+test("injectChildFrames drops the top frame, errors and nulls, and survives a failed call", async () => {
+  const { FF, sandbox } = loadWithTools();
+  sandbox.browser.scripting = {
+    executeScript: async (opts) => {
+      assert.equal(opts.target.allFrames, true);
+      assert.equal(opts.injectImmediately, true);
+      return [
+        { frameId: 9, result: "b" },
+        { frameId: 0, result: "top" },
+        { frameId: 3, result: "a" },
+        { frameId: 4, error: new Error("nope") },
+        { frameId: 5, result: null },
+      ];
+    },
+  };
+  const got = await FF.injectChildFrames(1, () => {});
+  assert.deepEqual(got.map((r) => r.frameId), [3, 9]);
+  sandbox.browser.scripting.executeScript = async () => {
+    throw new Error("restricted");
+  };
+  assert.equal((await FF.injectChildFrames(1, () => {})).length, 0);
+});
+
+test("injectDescending replays in the named frame with the new args and reports that frame", async () => {
+  const { FF, sandbox } = loadWithTools();
+  const calls = [];
+  sandbox.browser.scripting = {
+    executeScript: async ({ target, args }) => {
+      calls.push([target.frameIds?.[0] ?? null, args[0]]);
+      return target.frameIds ? [{ result: { clicked: true } }] : [{ result: { descend: { frameId: 8, args: ["inner"] } } }];
+    },
+  };
+  const res = await FF.injectDescending(1, () => {}, ["outer"]);
+  assert.deepEqual(calls, [[null, "outer"], [8, "inner"]]);
+  assert.equal(res.clicked, true);
+  assert.equal(res.frameId, 8);
+
+  sandbox.browser.scripting.executeScript = async () => [{ result: { descend: { frameId: 8 } } }];
+  await assert.rejects(FF.injectDescending(1, () => {}, []), (err) => err.code === "SCRIPT_FAILED");
 });

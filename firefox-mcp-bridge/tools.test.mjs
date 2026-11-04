@@ -14,6 +14,7 @@ const EXPECTED = [
   "javascript_tool",
   // open_tab (Task 3)
   "open_tab",
+  "get_containers",
   // group A — tab tools
   "close_tab",
   "activate_tab",

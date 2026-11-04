@@ -14,7 +14,9 @@ const EXT = resolve(dirname(fileURLToPath(import.meta.url)), "../firefox-extensi
 const TAB_FILES = [
   "restricted.js",
   "marker.js",
+  "tools/containers.js",
   "tools/close-tab.js",
+  "tools/close-agent-tabs.js",
   "tools/activate-tab.js",
   "tools/reload.js",
   "tools/back.js",
@@ -22,6 +24,7 @@ const TAB_FILES = [
   "tools/tabs-summary.js",
   "tools/screenshot.js",
   "tools/find-element.js",
+  "tools/get-page-text.js",
 ];
 
 // Handlers run inside a vm sandbox, so objects they create live in another realm
@@ -123,6 +126,21 @@ test("get_tabs_summary flags only the agent tab with agent: true", async () => {
   assert.equal(res.tabs[1].agent, true);
 });
 
+test("get_tabs_summary names the container of tabs inside one, and only those", async () => {
+  const FF = loadTabTools({
+    contextualIdentities: { query: async () => [{ name: "Gmail", cookieStoreId: "firefox-container-7" }] },
+    tabs: {
+      query: async () => [
+        { id: 1, url: "https://mail.google.com", title: "Inbox", cookieStoreId: "firefox-container-7", windowId: 1 },
+        { id: 2, url: "https://x.com", title: "X", cookieStoreId: "firefox-default", windowId: 1 },
+      ],
+    },
+  });
+  const res = await FF.tools.get_tabs_summary();
+  assert.equal(res.tabs[0].container, "Gmail");
+  assert.equal("container" in res.tabs[1], false);
+});
+
 test("screenshot captures a background tab in place — no tab activation, no window focus", async () => {
   const captured = [];
   const FF = loadTabTools({
@@ -155,6 +173,49 @@ test("find_element rejects a call with neither text nor selector", async () => {
   }
 });
 
+test("find_element looks in child frames only after the top frame misses, and names the frame", async () => {
+  const FF = loadTabTools({});
+  const miss = { found: false, count: 1, hidden: 1 };
+  FF.inject = async () => miss;
+  FF.injectChildFrames = async () => [
+    { frameId: 5, result: { found: false, count: 2, hidden: 2 } },
+    { frameId: 6, result: { found: true, count: 1, x: 3, y: 4, ref: "r" } },
+  ];
+  const res = await FF.tools.find_element({ text: "Send" }, { id: 1 });
+  assert.equal(res.found, true);
+  assert.equal(res.frameId, 6);
+
+  FF.injectChildFrames = async () => [{ frameId: 5, result: { found: false, count: 2, hidden: 2 } }];
+  const none = await FF.tools.find_element({ text: "Send" }, { id: 1 });
+  assert.equal(none.found, false);
+  assert.equal(none.count, 3);
+  assert.equal(none.hidden, 3);
+
+  FF.inject = async () => ({ found: true, count: 1 });
+  FF.injectChildFrames = async () => {
+    throw new Error("must not search frames after a top-frame hit");
+  };
+  assert.equal((await FF.tools.find_element({ text: "Send" }, { id: 1 })).found, true);
+});
+
+test("get_page_text joins frame text under headers and applies maxLength to the whole", async () => {
+  const FF = loadTabTools({});
+  FF.inject = async () => ({ text: "top", truncated: false, length: 3 });
+  FF.injectChildFrames = async () => [
+    { frameId: 5, result: { text: "chat", truncated: false, length: 4, url: "https://x/chat" } },
+    { frameId: 6, result: { text: "   ", truncated: false, length: 3, url: "https://x/ad" } },
+  ];
+  const all = await FF.tools.get_page_text({}, { id: 1 });
+  assert.equal(all.text, "top\n\n[frame: https://x/chat]\nchat");
+  assert.equal(all.truncated, false);
+  assert.equal(all.length, all.text.length);
+
+  const cut = await FF.tools.get_page_text({ maxLength: 10 }, { id: 1 });
+  assert.equal(cut.text.length, 10);
+  assert.equal(cut.truncated, true);
+  assert.equal(cut.length, all.text.length);
+});
+
 test("back and forward drive tabs.goBack / tabs.goForward", async () => {
   const calls = [];
   const FF = loadTabTools({
@@ -166,4 +227,42 @@ test("back and forward drive tabs.goBack / tabs.goForward", async () => {
   assert.equal((await FF.tools.back({ tabId: 2 })).navigated, "back");
   assert.equal((await FF.tools.forward({ tabId: 2 })).navigated, "forward");
   assert.deepEqual(calls, [["back", 2], ["forward", 2]]);
+});
+
+test("close_agent_tabs closes the agent's background tabs and leaves the one you're viewing", async () => {
+  const removed = [];
+  const FF = loadTabTools({
+    tabs: {
+      query: async () => [
+        { id: 1, active: false },
+        { id: 2, active: true },
+        { id: 3, active: false },
+        { id: 4, active: false },
+      ],
+      remove: async (ids) => removed.push(...ids),
+    },
+  });
+  FF.expectedCloses = new Set();
+  FF.markedTabs.set(1, "a");
+  FF.markedTabs.set(2, null);
+  FF.agentTabId = 3;
+
+  const dry = await FF.tools.close_agent_tabs({ dryRun: true });
+  assert.deepEqual(j(dry), { closed: [], wouldClose: [1, 3], kept: [2] });
+  assert.deepEqual(removed, [], "a dry run closes nothing");
+
+  const res = await FF.tools.close_agent_tabs({});
+  assert.deepEqual(j(res), { closed: [1, 3], kept: [2] });
+  assert.deepEqual(removed, [1, 3], "tab 4 was never the agent's");
+  assert.deepEqual([...FF.expectedCloses].sort(), [1, 3], "closes are deliberate, not container reopens");
+});
+
+test("get_tabs_summary flags every agent-opened tab with opened: true", async () => {
+  const FF = loadTabTools({
+    tabs: { query: async () => [{ id: 1, title: "a" }, { id: 2, title: "b" }, { id: 3, title: "c" }] },
+  });
+  FF.markedTabs.set(1, null);
+  FF.agentTabId = 2;
+  const { tabs } = j(await FF.tools.get_tabs_summary());
+  assert.deepEqual(tabs.map((t) => [t.id, !!t.opened, !!t.agent]), [[1, true, false], [2, true, true], [3, false, false]]);
 });

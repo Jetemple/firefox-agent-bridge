@@ -11,6 +11,11 @@ import { createSessionStore } from "./sessions.mjs";
 
 export const HEALTH_NAME = "firefox-mcp-bridge";
 export const MAX_DISPATCH_TIMEOUT_MS = 120000;
+// MCP clients that exit without a DELETE leave their session behind forever
+// (one per Claude Code session that loaded the plugin). Close any session idle
+// this long. Generous on purpose: a swept client gets 404 on its next request,
+// which the MCP spec tells it to answer by re-initializing.
+export const MCP_IDLE_MS = 4 * 60 * 60 * 1000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 // Zod validators per dispatchable tool. ping_firefox is bridge-local (answered
@@ -36,6 +41,9 @@ const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 // set_profile_name is dispatchable (the CLI names profiles with it) but is
 // deliberately NOT in TOOLS: it must not appear in the MCP tool list.
 DISPATCH_SCHEMAS.set("set_profile_name", z.object({ name: z.string().regex(NAME_RE) }));
+// close_agent_tabs is CLI housekeeping (`ff tab close --mine`), kept out of
+// the MCP tool list for the same reason.
+DISPATCH_SCHEMAS.set("close_agent_tabs", z.object({ dryRun: z.boolean().optional() }).strict());
 
 // Bridge pseudo-tools: answered locally, never forwarded to the extension.
 export const BRIDGE_TOOL_SCHEMAS = new Map([
@@ -146,9 +154,12 @@ export function createBridgeHttpServer({
   fileToken,
   envToken = null,
   log = () => {},
+  mcpIdleMs = MCP_IDLE_MS,
+  now = Date.now,
 }) {
   if (!fileToken) throw new Error("createBridgeHttpServer requires a non-empty fileToken");
   const mcpSessions = new Map(); // mcp-session-id -> StreamableHTTPServerTransport
+  const mcpLastSeen = new Map(); // mcp-session-id -> ms of its last request
 
   function toolError(res, code, message) {
     return sendJson(res, 200, { error: { code, message } });
@@ -267,6 +278,17 @@ export function createBridgeHttpServer({
       const opts = { ...(v.timeoutMs ? { timeoutMs: v.timeoutMs } : {}), ...(profile ? { profile } : {}) };
       const result = await relay.dispatch(v.tool, args, opts);
       if (v.session && v.tool === "close_tab") sessions.remove(v.session);
+      if (v.tool === "close_agent_tabs" && result?.closed?.length) {
+        // Drop sessions bound to the tabs just closed. The tabs are already
+        // gone, so a profile we can't pin down skips the cleanup, never fails.
+        let closedProfile = profile;
+        try {
+          closedProfile ??= resolveProfileEntry(null).name;
+        } catch {}
+        for (const rec of sessions.list()) {
+          if (rec.profile === closedProfile && result.closed.includes(rec.tabId)) sessions.remove(rec.name);
+        }
+      }
       return sendJson(res, 200, { result });
     } catch (err) {
       // Tool-level failures (NO_CLIENT, WS_TIMEOUT, extension errors) are 200
@@ -305,12 +327,14 @@ export function createBridgeHttpServer({
     if (sessionId) {
       const transport = mcpSessions.get(sessionId);
       if (!transport) {
-        return sendJson(res, 400, {
+        // 404, not 400: the spec's signal for "session gone, re-initialize".
+        return sendJson(res, 404, {
           jsonrpc: "2.0",
           error: { code: -32000, message: "Unknown or expired session" },
           id: null,
         });
       }
+      mcpLastSeen.set(sessionId, now());
       return transport.handleRequest(req, res, body);
     }
     if (req.method === "POST" && isInitializeRequest(body)) {
@@ -320,6 +344,7 @@ export function createBridgeHttpServer({
         // request arrives before initialization completes.
         onsessioninitialized: (id) => {
           mcpSessions.set(id, transport);
+          mcpLastSeen.set(id, now());
           log(`MCP session ${id} opened (${mcpSessions.size} active)`);
         },
       });
@@ -327,6 +352,7 @@ export function createBridgeHttpServer({
         for (const [id, t] of mcpSessions) {
           if (t === transport) {
             mcpSessions.delete(id);
+            mcpLastSeen.delete(id);
             log(`MCP session ${id} closed (${mcpSessions.size} active)`);
           }
         }
@@ -377,7 +403,26 @@ export function createBridgeHttpServer({
     });
   });
 
+  // Close every MCP session idle past mcpIdleMs; transport.onclose drops it
+  // from the maps and logs it.
+  async function sweepIdleSessions() {
+    const cutoff = now() - mcpIdleMs;
+    for (const [id, transport] of [...mcpSessions]) {
+      if ((mcpLastSeen.get(id) ?? 0) > cutoff) continue;
+      try {
+        await transport.close();
+      } catch {
+        /* ignore */
+      }
+      mcpSessions.delete(id);
+      mcpLastSeen.delete(id);
+    }
+  }
+  const sweepTimer = setInterval(sweepIdleSessions, Math.min(mcpIdleMs, 5 * 60 * 1000));
+  sweepTimer.unref?.();
+
   async function closeAllSessions() {
+    clearInterval(sweepTimer);
     for (const transport of [...mcpSessions.values()]) {
       try {
         await transport.close();
@@ -386,7 +431,8 @@ export function createBridgeHttpServer({
       }
     }
     mcpSessions.clear();
+    mcpLastSeen.clear();
   }
 
-  return { server, closeAllSessions, sessionCount: () => mcpSessions.size };
+  return { server, closeAllSessions, sweepIdleSessions, sessionCount: () => mcpSessions.size };
 }

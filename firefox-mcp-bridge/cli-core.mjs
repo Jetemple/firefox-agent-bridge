@@ -6,7 +6,7 @@
 const GLOBAL_BOOL = new Set(["json", "no-autostart", "replace", "here"]);
 const GLOBAL_VALUE = new Set(["session", "profile", "timeout", "wait-for", "wait-timeout"]);
 const BOOL_FLAGS = new Set([
-  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "ctrl", "alt", "shift", "meta", "foreground",
+  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "mine", "dry-run", "ctrl", "alt", "shift", "meta", "foreground",
 ]);
 
 function tokenize(argv) {
@@ -113,9 +113,13 @@ const BUILDERS = {
     return [{ tool: "javascript_tool", args }];
   },
   tab: (pos, flags) => {
+    if (pos[0] === "close" && flags.mine) {
+      if (flags.tab != null || flags.here) throw new UsageError("--mine closes every agent-opened tab; drop --tab/--here");
+      return [{ tool: "close_agent_tabs", args: flags["dry-run"] ? { dryRun: true } : {} }];
+    }
     if (pos[0] === "close") return [{ tool: "close_tab", args: withTab({}, flags) }];
     if (pos[0] === "activate") return [{ tool: "activate_tab", args: withTab({}, flags) }];
-    throw new UsageError("usage: ff tab close|activate [--tab N]");
+    throw new UsageError("usage: ff tab close|activate [--tab N], or ff tab close --mine [--dry-run]");
   },
   reload: (pos, flags) => {
     const args = withTab({}, flags);
@@ -169,13 +173,24 @@ const BUILDERS = {
     return [{ tool: "get_tables", args }];
   },
   open: (pos, flags) => {
-    if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--profile P] [--foreground]");
+    if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--container C] [--profile P] [--foreground]");
     const args = { url: pos[0], active: !!flags.foreground };
     // --as names a session; hand it to the extension as the tab-title marker
     // label so the strip shows "🤖 <name> · …". Omitted → emoji-only stamp.
     if (flags.as != null) args.label = flags.as;
+    if ("container" in flags) {
+      if (typeof flags.container !== "string" || !flags.container.trim()) {
+        throw new UsageError("missing value for --container (see ff containers)");
+      }
+      args.container = flags.container;
+      // Preflight: an extension older than 0.2.3 would drop the unknown
+      // container arg and open the page outside the container. It doesn't
+      // know get_containers either, so this fails first and nothing opens.
+      return [{ tool: "get_containers", args: {} }, { tool: "open_tab", args }];
+    }
     return [{ tool: "open_tab", args }];
   },
+  containers: () => [{ tool: "get_containers", args: {} }],
   sessions: () => [{ tool: "session_list", args: {} }],
   session: (pos) => {
     if (pos[0] === "rm" && pos[1]) return [{ tool: "session_remove", args: { name: pos[1] } }];
@@ -220,7 +235,14 @@ function pointerStep(tool, flags) {
   return {
     tool,
     buildArgs: (found) =>
-      found && found.found ? withTab({ x: found.x, y: found.y }, flags) : null,
+      found && found.found
+        ? withTab({
+            x: found.x,
+            y: found.y,
+            ...(found.ref ? { ref: found.ref } : {}),
+            ...(found.frameId ? { frameId: found.frameId } : {}),
+          }, flags)
+        : null,
   };
 }
 
@@ -234,7 +256,7 @@ const LIFECYCLE = new Set(["status", "start", "stop", "ping"]);
 // Global flags are legal BEFORE the command too (`ff -s research text`).
 // Consume leading globals, then hand the remainder to the command parser;
 // tokenize() already accepts them after the command.
-function splitLeadingGlobals(argv) {
+export function splitLeadingGlobals(argv) {
   const globals = [];
   let i = 0;
   while (i < argv.length) {
@@ -329,15 +351,22 @@ export function parseCli(argv) {
   }
 }
 
+// One `ff tabs` line. [name] is the session that owns the tab, [opened] a tab an
+// agent opened without naming a session: both are someone's work in progress.
+// {name} is the Firefox container the tab lives in.
+export function formatTab(t) {
+  const owner = t.session ? `[${t.session}] ` : t.opened && !t.agent ? "[opened] " : "";
+  const container = t.container ? `{${t.container}} ` : "";
+  return `${t.id}${t.active ? "*" : " "}  ${t.agent ? "🤖 " : ""}${owner}${container}${t.title ?? ""} — ${t.url ?? ""}`;
+}
+
 export function formatResult(command, results, { json = false } = {}) {
   const last = results[results.length - 1]?.result;
   if (json) return JSON.stringify(last, null, 2);
   switch (command) {
     case "tabs": {
       const tabs = last?.tabs ?? [];
-      return tabs
-        .map((t) => `${t.id}${t.active ? "*" : " "}  ${t.agent ? "🤖 " : ""}${t.title ?? ""} — ${t.url ?? ""}`)
-        .join("\n");
+      return tabs.map(formatTab).join("\n");
     }
     case "text":
       return typeof last?.text === "string" ? last.text : JSON.stringify(last, null, 2);
@@ -349,7 +378,7 @@ export function formatResult(command, results, { json = false } = {}) {
     }
     case "find":
       return last?.found
-        ? `found ${last.element} "${last.text}" at (${last.x}, ${last.y})${last.count > 1 ? ` (+${last.count - 1} more matches)` : ""}`
+        ? `found ${last.element} "${last.text}" at (${last.x}, ${last.y})${last.frameId ? ` in frame ${last.frameId}` : ""}${last.count > 1 ? ` (+${last.count - 1} more matches)` : ""}`
         : "not found";
     case "links": {
       const links = last?.links ?? [];
@@ -371,7 +400,22 @@ export function formatResult(command, results, { json = false } = {}) {
       return `profile named "${last?.name}"`; // set_profile_name result
     }
     case "open":
-      return `tab ${last?.tabId}`;
+      return `tab ${last?.tabId}${last?.container ? ` in container ${last.container}` : ""}`;
+    case "containers": {
+      const containers = last?.containers ?? [];
+      if (!containers.length) return "no containers (none exist, or containers are turned off in this profile)";
+      return containers.map((c) => `${c.name}  ${c.cookieStoreId}  ${c.color ?? ""}`.trimEnd()).join("\n");
+    }
+    case "tab": {
+      if (!Array.isArray(last?.closed)) return JSON.stringify(last, null, 2);
+      const kept = last.kept?.length ? ` (left ${last.kept.join(", ")} open: you're viewing it)` : "";
+      if (last.wouldClose) {
+        return last.wouldClose.length
+          ? `would close ${last.wouldClose.length} agent tab(s): ${last.wouldClose.join(", ")}${kept}`
+          : `no agent tabs to close${kept}`;
+      }
+      return `closed ${last.closed.length} agent tab(s): ${last.closed.join(", ")}${kept}`;
+    }
     case "bind":
       return `session ${last?.name} → tab ${last?.tabId} (profile ${last?.profile})`;
     case "session":
@@ -386,8 +430,10 @@ export function usageText() {
 
 Bridge:  ff status | start [--replace] | stop | ping
 Tabs:    ff tabs                        ff tab close|activate [--tab N]
+         ff tab close --mine [--dry-run]  close every tab the agent opened
          ff nav <url> [--tab N]         ff reload [--hard] | back | forward
-         ff open <url> [--as NAME] [--foreground]
+         ff open <url> [--as NAME] [--container C] [--foreground]
+         ff containers                  list containers (by name or id for --container)
 Session: ff sessions | ff session rm NAME | ff bind NAME --tab N
          ff -s NAME <command>           any tab command runs against the session
 Profile: ff profiles | ff profiles name [OLD] NEW | ff --profile P <command>
@@ -404,7 +450,12 @@ Act:     ff click <query> [--css SEL] | --at X,Y     (also: hover, dblclick, rcl
 Commands run in the agent tab (🤖), a background tab \`ff nav\` opens and reuses —
 your view never switches. --here targets the tab you're viewing instead;
 \`ff tab activate\` brings the agent tab into view.
-<query> matches visible text/aria-label (find_element); add --css to scope.
+<query> matches visible text/aria-label/placeholder (find_element), in iframes and
+shadow roots too; add --css to scope. A click whose target is covered fails without
+clicking; --at X,Y clicks whatever is at that point. "tabHidden" in a result means
+the tab was in the background, where some pages ignore clicks.
+Tabs:    [name] marks a tab another session owns, [opened] one an agent opened,
+         {name} its container. ff open --container C --as S, then ff -s S <cmd>.
 Global:  --tab N   --here   -s NAME   --profile P   --json   --timeout MS   --no-autostart
          --wait-for <css> [--wait-timeout MS]   poll until an element appears
 js prints string results raw; add --json for the full value as JSON. Results past

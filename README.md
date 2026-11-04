@@ -67,6 +67,23 @@ and `ff tab activate` brings the agent tab into view when you want to watch.
 If you close the agent tab, commands error until the next `ff nav` rather than
 falling through to your tab.
 
+Some extensions reopen a tab under a new id as it loads; container extensions
+do this to sites they assign to a container. `ff` follows the swap, and
+`ff open`/`ff nav` report the id the page ended up in. When you're done,
+`ff tab close --mine` closes every tab the agent opened except the one you're
+viewing (`--dry-run` lists them first). It only knows about tabs opened since
+the extension last started, and it covers every agent's tabs, not just yours.
+
+### Containers
+
+`ff containers` lists your Firefox containers. `ff open <url> --container
+Gmail` opens the page in one, matched by name (case-insensitive) or by its
+`firefox-container-N` id; an unknown name fails without opening anything.
+The reply names the container the tab actually landed in, since an "always
+open in" rule can move it. `ff tabs` marks container tabs `{Gmail}`. An open
+tab can't change containers, so to keep working in one, name a session:
+`ff open <url> --container Gmail --as mail`, then `ff -s mail <command>`.
+
 ## Sessions & profiles
 
 Multiple agents (or one agent juggling tabs) can each pin a named session to a
@@ -99,7 +116,7 @@ Run `ff --help` for the one-screen version. Highlights:
 | | |
 | --- | --- |
 | `ff status` / `start` / `stop` / `ping` | bridge lifecycle & health |
-| `ff tabs`, `ff tab close\|activate [--tab N]` | tab management |
+| `ff tabs`, `ff tab close\|activate [--tab N]`, `ff tab close --mine [--dry-run]` | tab management |
 | `ff nav <url>`, `ff reload [--hard]`, `ff back`, `ff forward` | navigation |
 | `ff text`, `ff links`, `ff tables`, `ff find <text>` | reading pages |
 | `ff screenshot [-o f.png] [--jpeg]` | capture (writes a file, prints the path) |
@@ -203,6 +220,12 @@ anything reaches Firefox. `/health` exposes only name/version/pid/startedAt/conn
   read-back (e.g. `get_page_text`) when you need to be sure a step landed.
 - Mouse and keyboard tools dispatch synthetic DOM events: they drive page handlers, not
   native browser chrome.
+- `find_element`, `get_page_text`, the pointer tools, `type` and `press_key` reach into
+  iframes and shadow roots (open and closed). `get_links`, `get_tables`, `javascript_tool`,
+  `drag`, `scroll`, `select_option` and `set_checkbox` stay in the top frame's light DOM.
+- A successful `click` means events were dispatched. A click aimed through `find_element`'s
+  `ref` fails if another element covers the target; `tabHidden: true` flags a background tab,
+  where some pages ignore clicks.
 
 ## Permanent install
 

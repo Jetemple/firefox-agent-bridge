@@ -5,6 +5,7 @@
 
   FF.tools.get_tabs_summary = async () => {
     const tabs = await browser.tabs.query({});
+    const containers = (await FF.containerNames?.()) ?? new Map();
     return {
       tabs: tabs.map((t) => ({
         id: t.id,
@@ -15,8 +16,13 @@
         active: t.active,
         pinned: t.pinned,
         windowId: t.windowId,
-        // Only on the agent tab, to keep the common case's payload unchanged.
+        // Only on tabs inside a container (Firefox's contextual identities).
+        ...(containers.has(t.cookieStoreId) ? { container: containers.get(t.cookieStoreId) } : {}),
+        // Only on agent tabs, to keep the common case's payload unchanged:
+        // `agent` is the tab un-targeted commands drive, `opened` any tab the
+        // agent opened (what close_agent_tabs would close).
         ...(t.id === FF.agentTabId ? { agent: true } : {}),
+        ...(FF.markedTabs?.has(t.id) || t.id === FF.agentTabId ? { opened: true } : {}),
       })),
     };
   };

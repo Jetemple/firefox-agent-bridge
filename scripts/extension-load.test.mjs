@@ -78,11 +78,11 @@ test("background scripts fully load: every WS tool handler + onMessage listener 
   assert.doesNotThrow(() => vm.runInContext(concatenatedSource(), sandbox), "background load must not throw");
 
   // The extension must implement exactly the tools the bridge dispatches over
-  // MCP, plus set_profile_name — a bridge-only management tool (see Task 2)
-  // that the relay calls directly and that is never listed for MCP clients.
+  // MCP, plus the CLI-only tools the bridge dispatches but never lists for MCP
+  // clients: set_profile_name (see Task 2) and close_agent_tabs (`ff tab close --mine`).
   assert.deepEqual(
     Object.keys(sandbox.FFBridge.tools).sort(),
-    [...WS_TOOL_NAMES, "set_profile_name"].sort(),
+    [...WS_TOOL_NAMES, "set_profile_name", "close_agent_tabs"].sort(),
   );
   assert.equal(typeof sandbox.__onMessage, "function", "onMessage listener must register");
 });

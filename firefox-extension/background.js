@@ -77,12 +77,13 @@ function toWireError(err) {
 // --- script injection helper ---------------------------------------------
 
 // Runs `func(...args)` in the page and returns its single result, mapping any
-// failure to SCRIPT_FAILED. `world` is "ISOLATED" (default) or "MAIN".
-FF.inject = async function inject(tabId, func, args = [], world) {
+// failure to SCRIPT_FAILED. `world` is "ISOLATED" (default) or "MAIN". `frameId`
+// targets one frame (top frame by default).
+FF.inject = async function inject(tabId, func, args = [], world, frameId) {
   let results;
   try {
     results = await browser.scripting.executeScript({
-      target: { tabId },
+      target: frameId ? { tabId, frameIds: [frameId] } : { tabId },
       func,
       args,
       ...(world ? { world } : {}),
@@ -94,6 +95,41 @@ FF.inject = async function inject(tabId, func, args = [], world) {
   if (!first) throw bridgeError("SCRIPT_FAILED", "executeScript returned no result");
   if (first.error) throw bridgeError("SCRIPT_FAILED", String(first.error));
   return first.result;
+};
+
+// Runs `func(...args)` in every frame below the top one, resolving to
+// [{ frameId, result }]. injectImmediately because executeScript otherwise waits
+// for each frame's document_idle, so one stalled ad iframe would hang the call.
+// Frames that can't be scripted or answer null are left out.
+FF.injectChildFrames = async function injectChildFrames(tabId, func, args = []) {
+  let results;
+  try {
+    results = await browser.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      injectImmediately: true,
+      func,
+      args,
+    });
+  } catch {
+    return [];
+  }
+  return results
+    .filter((r) => r.frameId && !r.error && r.result != null)
+    .sort((a, b) => a.frameId - b.frameId)
+    .map(({ frameId, result }) => ({ frameId, result }));
+};
+
+// FF.inject for functions that may answer { descend: { frameId, args? } } when
+// the element they want sits inside an iframe: replays them in that frame.
+const MAX_FRAME_DEPTH = 16;
+FF.injectDescending = async function injectDescending(tabId, func, args, frameId) {
+  for (let depth = 0; depth < MAX_FRAME_DEPTH; depth++) {
+    const res = await FF.inject(tabId, func, args, undefined, frameId);
+    if (!res?.descend) return frameId ? { ...res, frameId } : res;
+    frameId = res.descend.frameId;
+    args = res.descend.args ?? args;
+  }
+  throw bridgeError("SCRIPT_FAILED", "frames nested too deeply");
 };
 
 // --- tab marker ----------------------------------------------------------
@@ -126,13 +162,120 @@ FF.onTabUpdated = async function onTabUpdated(tabId, changeInfo, tab) {
   }
 };
 
-FF.onTabRemoved = function onTabRemoved(tabId) {
+// --- replaced tabs ---------------------------------------------------------
+
+// Container extensions (Multi-Account Containers, Temporary Containers) move a
+// tab into a container by opening a copy and closing the original, so a tab the
+// agent just opened can vanish within a second and every id it was handed goes
+// stale. When an agent-owned tab closes, adopt the tab opened alongside it (just
+// before or just after) in the same window, and resolve the old id to the new
+// one from then on. Only agent-owned tabs are ever followed, and a close the
+// agent asked for (close_tab) is never treated as a replacement.
+const REPLACE_WINDOW_MS = 2000;
+FF.tabAliases ??= new Map(); // replaced id -> replacement id
+FF.expectedCloses ??= new Set(); // ids close_tab is removing on purpose
+const recentlyCreated = new Map(); // tab id -> { windowId, openerTabId, at }
+const orphaned = new Map(); // agent tab id that closed unmatched -> { windowId, at }
+FF.now = () => Date.now();
+FF.sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isAgentOwned(tabId) {
+  return FF.markedTabs.has(tabId) || FF.agentTabId === tabId;
+}
+
+function prune(map) {
+  const cutoff = FF.now() - REPLACE_WINDOW_MS;
+  for (const [id, rec] of map) if (rec.at < cutoff) map.delete(id);
+}
+
+// Hand the old tab's identity (agent-tab role, marker label) to its replacement.
+function adoptReplacement(oldId, newId) {
+  FF.tabAliases.set(oldId, newId);
+  if (FF.agentTabId === oldId) FF.agentTabId = newId;
+  if (FF.markedTabs.has(oldId)) FF.markedTabs.set(newId, FF.markedTabs.get(oldId));
+  FF.markedTabs.delete(oldId);
+  orphaned.delete(oldId);
+  recentlyCreated.delete(newId);
+}
+
+// A replacement candidate: same window, inside the window, not itself agent
+// owned. An openerTabId pointing at the closed tab is decisive; otherwise the
+// match must be unambiguous (exactly one candidate).
+function pickReplacement(oldId, windowId, candidates) {
+  const fits = [...candidates].filter(([id, rec]) => rec.windowId === windowId && !isAgentOwned(id));
+  const opened = fits.find(([, rec]) => rec.openerTabId === oldId);
+  if (opened) return opened[0];
+  return fits.length === 1 ? fits[0][0] : null;
+}
+
+FF.onTabCreated = function onTabCreated(tab) {
+  if (!tab || tab.id == null) return;
+  prune(recentlyCreated);
+  prune(orphaned);
+  const created = [[tab.id, { windowId: tab.windowId, openerTabId: tab.openerTabId, at: FF.now() }]];
+  for (const [oldId, rec] of orphaned) {
+    if (pickReplacement(oldId, rec.windowId, created) === tab.id) {
+      adoptReplacement(oldId, tab.id);
+      return;
+    }
+  }
+  recentlyCreated.set(...created[0]);
+};
+
+FF.onTabRemoved = function onTabRemoved(tabId, removeInfo = {}) {
+  recentlyCreated.delete(tabId);
+  const expected = FF.expectedCloses.delete(tabId);
+  if (!expected && !removeInfo.isWindowClosing && isAgentOwned(tabId)) {
+    prune(recentlyCreated);
+    const newId = pickReplacement(tabId, removeInfo.windowId, recentlyCreated);
+    if (newId != null) return adoptReplacement(tabId, newId);
+    orphaned.set(tabId, { windowId: removeInfo.windowId, at: FF.now() });
+  }
   FF.markedTabs.delete(tabId);
 };
 
+// Follow a (possibly replaced) tab id to the tab that stands in for it now.
+FF.followTab = function followTab(tabId) {
+  for (let hops = 0; FF.tabAliases.has(tabId) && hops < 16; hops++) tabId = FF.tabAliases.get(tabId);
+  return tabId;
+};
+
+// A just-closed agent tab may still be waiting for its replacement to open;
+// give it the replacement window before declaring the id stale.
+async function awaitReplacement(tabId) {
+  if (typeof tabId !== "number") return tabId;
+  while (orphaned.has(tabId) && FF.now() - orphaned.get(tabId).at < REPLACE_WINDOW_MS) {
+    await FF.sleep(100);
+  }
+  return FF.followTab(tabId);
+}
+FF.awaitReplacement = awaitReplacement;
+
+// A tab just created or navigated shows about:blank (or its previous page)
+// until the load commits, and a container extension may swap it for a copy
+// before that. Wait briefly for it to show a new, scriptable URL so callers get
+// back the tab id and url that will actually stay valid. Resolves to that tab,
+// or to whatever the tab looks like at the deadline (null if it's gone).
+const SETTLE_MS = 3000;
+FF.settleTab = async function settleTab(tabId, fromUrl) {
+  const deadline = FF.now() + SETTLE_MS;
+  for (;;) {
+    let tab = null;
+    try {
+      tab = await browser.tabs.get(FF.followTab(tabId));
+    } catch {
+      /* closed, maybe mid-swap: the replacement gets adopted on its own */
+    }
+    if (tab && !FF.isRestricted(tab.url) && tab.url !== fromUrl) return tab;
+    if (FF.now() >= deadline) return tab;
+    await FF.sleep(100);
+  }
+};
+
 // `?.` so test sandboxes that stub browser.tabs without event hubs still load.
+browser.tabs.onCreated?.addListener((tab) => FF.onTabCreated(tab));
 browser.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => FF.onTabUpdated(tabId, changeInfo, tab));
-browser.tabs.onRemoved?.addListener((tabId) => FF.onTabRemoved(tabId));
+browser.tabs.onRemoved?.addListener((tabId, removeInfo) => FF.onTabRemoved(tabId, removeInfo));
 
 // --- tab resolution + dispatch -------------------------------------------
 
@@ -164,7 +307,7 @@ async function resolveTab(tabId) {
   }
   if (FF.agentTabId != null) {
     try {
-      return await browser.tabs.get(FF.agentTabId);
+      return await browser.tabs.get(await awaitReplacement(FF.agentTabId));
     } catch {
       // Same rule as a stale explicit id: once the agent has a tab, its closing
       // must not redirect clicks/typing into the user's tab.
@@ -199,12 +342,14 @@ const NO_TAB = new Set([
   "get_tabs_summary",
   "navigate",
   "close_tab",
+  "close_agent_tabs",
   "activate_tab",
   "reload",
   "back",
   "forward",
   "set_profile_name",
   "open_tab",
+  "get_containers",
 ]);
 // Tools that need the resolved tab (for windowId/activation) but are allowed on
 // restricted URLs (captureVisibleTab does not inject script).
@@ -214,11 +359,20 @@ async function runTool(tool, args) {
   const handler = FF.tools[tool];
   if (typeof handler !== "function") throw bridgeError("UNKNOWN_TOOL", `Unknown tool: ${tool}`);
 
+  // A tab id the agent was handed may belong to a tab that has since been
+  // replaced (see "replaced tabs"); act on the replacement instead.
+  if (typeof args.tabId === "number") args = { ...args, tabId: await awaitReplacement(args.tabId) };
   if (NO_TAB.has(tool)) return handler(args);
 
-  const tab = await resolveTab(args.tabId);
+  let tab = await resolveTab(args.tabId);
   if (!SKIP_RESTRICTED.has(tool) && FF.isRestricted(tab.url)) {
-    throw bridgeError("RESTRICTED_URL", `Tab URL is restricted: ${tab.url}`);
+    // A tab used right after it was opened is still about:blank; wait for its
+    // page instead of failing.
+    if (tab.url === "about:blank" && tab.status === "loading") tab = (await FF.settleTab(tab.id)) ?? tab;
+    if (tab.url === "about:blank" && tab.status === "loading") {
+      throw bridgeError("RESTRICTED_URL", `Tab ${tab.id} hasn't started loading its page yet (still about:blank) — retry in a moment`);
+    }
+    if (FF.isRestricted(tab.url)) throw bridgeError("RESTRICTED_URL", `Tab URL is restricted: ${tab.url}`);
   }
   return handler(args, tab);
 }

@@ -24,15 +24,12 @@ function loadInjected() {
   vm.createContext(sandbox);
   for (const file of [
     "tools/type.js",
-    "tools/click.js",
+    "tools/pointer.js",
     "tools/get-page-text.js",
     "tools/screenshot.js",
     "tools/javascript-tool.js",
     "tools/press-key.js",
     "tools/scroll.js",
-    "tools/hover.js",
-    "tools/double-click.js",
-    "tools/right-click.js",
     "tools/drag.js",
     "tools/select-option.js",
     "tools/set-checkbox.js",
@@ -151,7 +148,7 @@ test("performType inserts into contenteditable and refuses non-editable targets"
   assert.equal(plainFn("x", false).typed, false);
 });
 
-test("performClick is self-contained, describes the element, and dispatches", () => {
+test("performPointer is self-contained, describes the element, and dispatches", () => {
   let dispatched = 0;
   const target = {
     tagName: "BUTTON",
@@ -166,32 +163,32 @@ test("performClick is self-contained, describes the element, and dispatches", ()
     isContentEditable: false,
     focus: () => {},
   };
-  const fn = reserialize(injected.performClick, {
+  const fn = reserialize(injected.performPointer, {
     window: {},
     document: { elementFromPoint: () => target },
     PointerEvent: FakeEvent,
     MouseEvent: FakeEvent,
   });
-  const res = fn(5, 6);
+  const res = fn("click", 5, 6);
   assert.equal(res.clicked, true);
   assert.equal(res.element, "button#go.primary");
   assert.equal(dispatched, 5); // pointerdown, mousedown, pointerup, mouseup, click
 });
 
-test("performClick reports when there is no element at the coordinates", () => {
-  const fn = reserialize(injected.performClick, {
+test("performPointer reports when there is no element at the coordinates", () => {
+  const fn = reserialize(injected.performPointer, {
     window: {},
     document: { elementFromPoint: () => null },
     PointerEvent: FakeEvent,
     MouseEvent: FakeEvent,
   });
-  assert.equal(fn(1, 1).clicked, false);
+  assert.equal(fn("click", 1, 1).clicked, false);
 });
 
 test("extractPageText truncates in-page and reports the original length", () => {
   // Compare fields (objects come from another realm, so no deepEqual).
   const fn = (globals) => reserialize(injected.extractPageText, globals);
-  const ctx = { document: { body: { innerText: "Hello World" } } };
+  const ctx = { document: { body: { innerText: "Hello World" }, querySelectorAll: () => [] } };
   const t = fn(ctx)(5);
   assert.equal(t.text, "Hello");
   assert.equal(t.truncated, true);
@@ -279,56 +276,231 @@ test("performScroll scrolls an element into view when given a selector", () => {
   assert.equal(res.into, "#target");
 });
 
-test("performHover dispatches mouseover at the element under the point", () => {
+test("performPointer hover dispatches mouseover at the element under the point", () => {
   const events = [];
   const target = { tagName: "A", id: "lnk", classList: { length: 0 }, dispatchEvent: (e) => events.push(e.type) };
-  const fn = reserialize(injected.performHover, {
+  const fn = reserialize(injected.performPointer, {
+    window: {},
     document: { elementFromPoint: () => target },
     PointerEvent: FakeEvent,
     MouseEvent: FakeEvent,
   });
-  const res = fn(10, 20);
+  const res = fn("hover", 10, 20);
   assert.equal(res.hovered, true);
   assert.equal(res.element, "a#lnk");
   assert.ok(events.includes("mouseover"));
 });
 
-test("performHover reports when nothing is at the coordinates", () => {
-  const fn = reserialize(injected.performHover, {
+test("performPointer hover reports when nothing is at the coordinates", () => {
+  const fn = reserialize(injected.performPointer, {
+    window: {},
     document: { elementFromPoint: () => null },
     PointerEvent: FakeEvent,
     MouseEvent: FakeEvent,
   });
-  assert.equal(fn(1, 1).hovered, false);
+  assert.equal(fn("hover", 1, 1).hovered, false);
 });
 
-test("performDoubleClick fires two click sequences and a dblclick", () => {
+test("performPointer double_click fires two click sequences and a dblclick", () => {
   const events = [];
   const target = { tagName: "BUTTON", id: "", classList: { length: 0 }, dispatchEvent: (e) => events.push(e.type) };
-  const fn = reserialize(injected.performDoubleClick, {
+  const fn = reserialize(injected.performPointer, {
+    window: {},
     document: { elementFromPoint: () => target },
     PointerEvent: FakeEvent,
     MouseEvent: FakeEvent,
   });
-  const res = fn(5, 6);
+  const res = fn("double_click", 5, 6);
   assert.equal(res.doubleClicked, true);
   assert.equal(events.filter((t) => t === "click").length, 2);
   assert.equal(events.filter((t) => t === "dblclick").length, 1);
 });
 
-test("performRightClick dispatches a contextmenu with button 2", () => {
+test("performPointer right_click dispatches a contextmenu with button 2", () => {
   const events = [];
   const target = { tagName: "DIV", id: "", classList: { length: 0 }, dispatchEvent: (e) => events.push(e) };
-  const fn = reserialize(injected.performRightClick, {
+  const fn = reserialize(injected.performPointer, {
+    window: {},
     document: { elementFromPoint: () => target },
     PointerEvent: FakeEvent,
     MouseEvent: FakeEvent,
   });
-  const res = fn(3, 4);
+  const res = fn("right_click", 3, 4);
   assert.equal(res.rightClicked, true);
   const ctx = events.find((e) => e.type === "contextmenu");
   assert.ok(ctx);
   assert.equal(ctx.button, 2);
+});
+
+// A fake element for hit-testing: `over` is what the point resolves to inside its
+// shadow root, `parent` its light-DOM parent.
+function pointerEl(tagName, extra = {}) {
+  return {
+    tagName,
+    id: "",
+    classList: { length: 0 },
+    events: [],
+    dispatchEvent(e) {
+      this.events.push(e);
+    },
+    ...extra,
+  };
+}
+
+function pointerFn(hit, extraGlobals = {}, documentExtra = {}) {
+  return reserialize(injected.performPointer, {
+    window: {},
+    document: { elementFromPoint: () => hit, ...documentExtra },
+    PointerEvent: FakeEvent,
+    MouseEvent: FakeEvent,
+    ...extraGlobals,
+  });
+}
+
+test("performPointer refuses to dispatch when something covers find_element's target", () => {
+  const cover = pointerEl("DIV", { id: "cover" });
+  const res = pointerFn(cover)("click", 5, 6, "ref1");
+  assert.equal(res.clicked, false);
+  assert.equal(res.hit, "div#cover");
+  assert.equal(cover.events.length, 0);
+});
+
+test("performPointer counts a hit on the target, inside it, across a shadow boundary, or on its label", () => {
+  const target = pointerEl("BUTTON", { __ffRef: "r" });
+  assert.equal(pointerFn(target)("click", 1, 1, "r").clicked, true);
+
+  const child = pointerEl("SPAN", { parentNode: target });
+  assert.equal(pointerFn(child)("click", 1, 1, "r").clicked, true);
+  assert.equal(child.events.length, 5); // dispatched on what the point hit
+
+  const host = pointerEl("CHAT-WIDGET", { __ffRef: "r" });
+  const inShadow = pointerEl("SPAN", { parentNode: { host } });
+  assert.equal(pointerFn(inShadow)("click", 1, 1, "r").clicked, true);
+
+  const label = pointerEl("LABEL", { control: { __ffRef: "r" } });
+  assert.equal(pointerFn(label)("click", 1, 1, "r").clicked, true);
+});
+
+test("performPointer ignores a stale ref's absence when no ref is given", () => {
+  assert.equal(pointerFn(pointerEl("DIV"))("click", 1, 1, null).clicked, true);
+});
+
+test("performPointer hit-tests through shadow roots and sends composed events at the given point", () => {
+  const inner = pointerEl("BUTTON", { id: "go" });
+  const host = pointerEl("X-APP", { shadowRoot: { elementFromPoint: () => inner } });
+  const res = pointerFn(host)("click", 7, 8);
+  assert.equal(res.element, "button#go");
+  assert.equal(host.events.length, 0);
+  assert.equal(inner.events[0].composed, true);
+  assert.equal(inner.events[0].clientX, 7);
+  assert.equal(inner.events[0].clientY, 8);
+});
+
+test("performPointer stops at a shadow host whose root hit-tests back to itself", () => {
+  const host = pointerEl("X-APP");
+  host.shadowRoot = { elementFromPoint: () => host };
+  assert.equal(pointerFn(host)("click", 1, 1).element, "x-app");
+});
+
+test("performPointer asks to descend when the point lands on an iframe", () => {
+  const frame = pointerEl("IFRAME", {
+    clientLeft: 5,
+    clientTop: 5,
+    getBoundingClientRect: () => ({ left: 10, top: 100 }),
+  });
+  const browser = { runtime: { getFrameId: (el) => (el === frame ? 42 : -1) } };
+  const res = pointerFn(frame, { browser })("click", 50, 200);
+  assert.equal(res.descend.frameId, 42);
+  assert.deepEqual(Array.from(res.descend.args), ["click", 35, 95, null]);
+  assert.equal(frame.events.length, 0);
+});
+
+test("performPointer does not descend for a ref: an iframe over the target is a miss", () => {
+  const frame = pointerEl("IFRAME");
+  const res = pointerFn(frame)("click", 1, 1, "r");
+  assert.equal(res.clicked, false);
+  assert.equal(res.hit, "iframe");
+});
+
+test("performPointer flags a background tab", () => {
+  assert.equal(pointerFn(pointerEl("A"), {}, { visibilityState: "hidden" })("click", 1, 1).tabHidden, true);
+  assert.equal(pointerFn(pointerEl("A"), {}, { visibilityState: "visible" })("click", 1, 1).tabHidden, undefined);
+});
+
+test("performType and performPressKey follow focus into shadow roots and iframes", () => {
+  const frame = pointerEl("IFRAME");
+  const browser = { runtime: { getFrameId: () => 9 } };
+  const shadowed = pointerEl("X-APP", { shadowRoot: { activeElement: frame } });
+  const doc = { activeElement: shadowed, body: {}, documentElement: {} };
+  const type = reserialize(injected.performType, { document: doc, browser });
+  assert.equal(type("hi", false).descend.frameId, 9);
+  const key = reserialize(injected.performPressKey, { document: doc, browser, KeyboardEvent: FakeEvent });
+  assert.equal(key("Enter", {}).descend.frameId, 9);
+
+  // A host with no focus inside it stays the target.
+  const events = [];
+  const host = pointerEl("X-APP", { shadowRoot: { activeElement: null }, dispatchEvent: (e) => events.push(e.type) });
+  const key2 = reserialize(injected.performPressKey, {
+    document: { activeElement: host, body: {} },
+    KeyboardEvent: FakeEvent,
+  });
+  assert.equal(key2("Enter", {}).target, "x-app");
+  assert.deepEqual(events, ["keydown", "keyup"]);
+});
+
+test("extractPageText appends shadow root text and skips what isn't rendered", () => {
+  const text = { nodeType: 3, textContent: "bare text" };
+  const style = { nodeType: 1, checkVisibility: () => false, innerText: ".a{color:red}" };
+  const para = { nodeType: 1, checkVisibility: () => true, innerText: "in shadow" };
+  const nested = { shadowRoot: { childNodes: [para], querySelectorAll: () => [] } };
+  const host = { shadowRoot: { childNodes: [text, style], querySelectorAll: () => [nested] } };
+  const fn = reserialize(injected.extractPageText, {
+    document: { body: { innerText: "light" }, querySelectorAll: () => [host] },
+  });
+  assert.equal(fn(null).text, "light\nbare text\nin shadow");
+});
+
+test("extractPageText skips a frame with no viewport and names the frame it read", () => {
+  const document = { body: { innerText: "chat line" }, querySelectorAll: () => [] };
+  const location = { href: "https://x.test/chat?token=secret#end" };
+  const zero = reserialize(injected.extractPageText, { document, location, window: { innerWidth: 0, innerHeight: 0 } });
+  assert.equal(zero(null, true), null);
+  const sized = reserialize(injected.extractPageText, { document, location, window: { innerWidth: 300, innerHeight: 200 } });
+  assert.equal(sized(null, true).url, "https://x.test/chat");
+});
+
+test("findElement searches shadow roots, matches placeholders, and tags its pick with the ref", () => {
+  const input = {
+    tagName: "INPUT",
+    id: "",
+    classList: { length: 0 },
+    getAttribute: (name) => (name === "placeholder" ? "Type a message" : null),
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }),
+  };
+  const host = { shadowRoot: { querySelectorAll: (css) => (css === "*" ? [] : [input]) } };
+  const fn = reserialize(injected.findElement, {
+    document: { querySelectorAll: (css) => (css === "*" ? [host] : []) },
+  });
+  const res = fn("type a message", null, "tok");
+  assert.equal(res.found, true);
+  assert.equal(res.ref, "tok");
+  assert.equal(input.__ffRef, "tok");
+});
+
+test("findElement still matches a filled field by its label", () => {
+  const input = {
+    tagName: "TEXTAREA",
+    id: "",
+    classList: { length: 0 },
+    value: "already typed",
+    getAttribute: (name) => (name === "aria-label" ? "Message" : null),
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }),
+  };
+  const fn = reserialize(injected.findElement, {
+    document: { querySelectorAll: (css) => (css === "*" ? [] : [input]) },
+  });
+  assert.equal(fn("message", null).found, true);
+  assert.equal(fn("already", null).found, true);
 });
 
 test("performDrag presses at the source and releases at the destination", () => {

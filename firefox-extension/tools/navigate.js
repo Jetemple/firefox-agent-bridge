@@ -15,6 +15,15 @@
 
   FF.normalizeUrl = normalizeUrl;
 
+  // Wait for the tab to land (see FF.settleTab) and report the tab id and URL
+  // that will stay valid; fall back to what we asked for if it never does.
+  async function landed(tabId, url, fromUrl) {
+    const from = fromUrl === url ? undefined : fromUrl;
+    const tab = FF.isRestricted(url) ? null : await FF.settleTab?.(tabId, from);
+    if (tab && !FF.isRestricted(tab.url) && tab.url !== from) return { tabId: tab.id, url: tab.url };
+    return { tabId: FF.followTab?.(tabId) ?? tabId, url };
+  }
+
   FF.tools.navigate = async (args) => {
     const url = normalizeUrl(args.url);
     if (args.tabId != null) {
@@ -25,20 +34,21 @@
       } catch {
         throw FF.bridgeError("TAB_NOT_FOUND", `Tab ${tabId} not found`);
       }
-      return { tabId: tab.id, url };
+      return landed(tab.id, url, tab.url);
     }
     if (FF.agentTabId != null) {
+      let tab = null;
       try {
-        const tab = await browser.tabs.update(FF.agentTabId, { url });
-        return { tabId: tab.id, url };
+        tab = await browser.tabs.update(await FF.awaitReplacement(FF.agentTabId), { url });
       } catch {
         /* agent tab was closed — open a new one below */
       }
+      if (tab) return landed(tab.id, url, tab.url);
     }
     const tab = await browser.tabs.create({ url, active: false });
     FF.agentTabId = tab.id;
     // `?.` keeps this a no-op in harnesses without marker.js loaded.
     FF.markedTabs?.set(tab.id, null);
-    return { tabId: tab.id, url };
+    return landed(tab.id, url);
   };
 }
