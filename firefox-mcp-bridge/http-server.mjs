@@ -16,6 +16,11 @@ export const MAX_DISPATCH_TIMEOUT_MS = 120000;
 // this long. Generous on purpose: a swept client gets 404 on its next request,
 // which the MCP spec tells it to answer by re-initializing.
 export const MCP_IDLE_MS = 4 * 60 * 60 * 1000;
+// Agent tabs (opened by `ff open`/`navigate`, or bound to a named session)
+// untouched this long get closed by the sweep, so finished jobs don't leave
+// tabs behind when nobody remembers `tab close`. 0 turns the sweep off.
+export const AGENT_TAB_IDLE_MS = 2 * 60 * 60 * 1000;
+const SWEEP_EVERY_MS = 5 * 60 * 1000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 // Zod validators per dispatchable tool. ping_firefox is bridge-local (answered
@@ -155,11 +160,14 @@ export function createBridgeHttpServer({
   envToken = null,
   log = () => {},
   mcpIdleMs = MCP_IDLE_MS,
+  agentTabIdleMs = AGENT_TAB_IDLE_MS,
   now = Date.now,
 }) {
   if (!fileToken) throw new Error("createBridgeHttpServer requires a non-empty fileToken");
   const mcpSessions = new Map(); // mcp-session-id -> StreamableHTTPServerTransport
   const mcpLastSeen = new Map(); // mcp-session-id -> ms of its last request
+  const tabLastUsed = new Map(); // `${profile}\0${tabId}` -> ms of the last command on it
+  const tabKey = (profile, tabId) => `${profile}\0${tabId}`;
 
   function toolError(res, code, message) {
     return sendJson(res, 200, { error: { code, message } });
@@ -277,6 +285,16 @@ export function createBridgeHttpServer({
       }
       const opts = { ...(v.timeoutMs ? { timeoutMs: v.timeoutMs } : {}), ...(profile ? { profile } : {}) };
       const result = await relay.dispatch(v.tool, args, opts);
+      // Restart the idle clock on the tab this command used.
+      const usedTab = args?.tabId ?? result?.tabId;
+      if (usedTab != null) {
+        let usedProfile = profile;
+        try {
+          usedProfile ??= resolveProfileEntry(null).name;
+        } catch {}
+        if (usedProfile) tabLastUsed.set(tabKey(usedProfile, usedTab), now());
+      }
+      if (v.session) sessions.touch(v.session, now());
       if (v.session && v.tool === "close_tab") sessions.remove(v.session);
       if (v.tool === "close_agent_tabs" && result?.closed?.length) {
         // Drop sessions bound to the tabs just closed. The tabs are already
@@ -421,8 +439,72 @@ export function createBridgeHttpServer({
   const sweepTimer = setInterval(sweepIdleSessions, Math.min(mcpIdleMs, 5 * 60 * 1000));
   sweepTimer.unref?.();
 
+  // Close agent tabs idle past agentTabIdleMs and drop session records that
+  // can never be served again. Never touches the user's own tabs (neither
+  // agent-opened nor session-bound), the reused agent tab, the active tab in a
+  // window (someone may be looking at it), or pinned tabs.
+  async function sweepIdleAgentTabs() {
+    const closed = [];
+    const dropped = [];
+    if (!agentTabIdleMs) return { closed, dropped };
+    const cutoff = now() - agentTabIdleMs;
+    for (const p of relay.profiles()) {
+      let tabs;
+      try {
+        tabs = (await relay.dispatch("get_tabs_summary", {}, { profile: p.name }))?.tabs ?? [];
+      } catch {
+        continue; // can't see this profile right now; try next sweep
+      }
+      const ids = new Set(tabs.map((t) => t.id));
+      const owned = new Map();
+      for (const rec of sessions.list()) {
+        if (rec.profile !== p.name) continue;
+        // A new runId means Firefox restarted and tab ids were reissued.
+        if (p.runId != null && (rec.runId !== p.runId || !ids.has(rec.tabId))) {
+          sessions.remove(rec.name);
+          dropped.push(rec.name);
+        } else {
+          owned.set(rec.tabId, rec);
+        }
+      }
+      for (const key of [...tabLastUsed.keys()]) {
+        const [prof, id] = key.split("\0");
+        if (prof === p.name && !ids.has(Number(id))) tabLastUsed.delete(key);
+      }
+      for (const t of tabs) {
+        if (t.agent || t.active || t.pinned) continue;
+        const rec = owned.get(t.id);
+        if (!t.opened && !rec) continue;
+        const k = tabKey(p.name, t.id);
+        const last = tabLastUsed.get(k) ?? rec?.lastUsedAt ?? rec?.createdAt;
+        if (last == null) {
+          tabLastUsed.set(k, now()); // first sighting starts its clock
+          continue;
+        }
+        if (last > cutoff) continue;
+        try {
+          await relay.dispatch("close_tab", { tabId: t.id }, { profile: p.name });
+        } catch {
+          continue;
+        }
+        tabLastUsed.delete(k);
+        if (rec) sessions.remove(rec.name);
+        closed.push(t.id);
+      }
+    }
+    if (closed.length || dropped.length) {
+      log(`idle sweep: closed tabs [${closed.join(", ")}], dropped sessions [${dropped.join(", ")}]`);
+    }
+    return { closed, dropped };
+  }
+  const tabSweepTimer = setInterval(() => {
+    sweepIdleAgentTabs().catch((err) => log(`idle sweep failed: ${err?.message ?? err}`));
+  }, SWEEP_EVERY_MS);
+  tabSweepTimer.unref?.();
+
   async function closeAllSessions() {
     clearInterval(sweepTimer);
+    clearInterval(tabSweepTimer);
     for (const transport of [...mcpSessions.values()]) {
       try {
         await transport.close();
@@ -434,5 +516,5 @@ export function createBridgeHttpServer({
     mcpLastSeen.clear();
   }
 
-  return { server, closeAllSessions, sweepIdleSessions, sessionCount: () => mcpSessions.size };
+  return { server, closeAllSessions, sweepIdleSessions, sweepIdleAgentTabs, sessionCount: () => mcpSessions.size };
 }

@@ -65,12 +65,21 @@
     for (const [type, Ctor] of spec.events) el.dispatchEvent(new Ctor(type, opts));
 
     // Focus a focusable target so a following `type` has a deterministic element.
+    // A click inside a rich editor lands on a <p>/<span> within it, and focus()
+    // on that child does nothing: focus the editing host (outermost
+    // contenteditable ancestor) instead.
+    let focusTarget = el;
+    if (el.isContentEditable) {
+      while (focusTarget.parentElement && focusTarget.parentElement.isContentEditable) {
+        focusTarget = focusTarget.parentElement;
+      }
+    }
     const focusable =
-      el.isContentEditable ||
-      (el.matches && el.matches("input, textarea, select, [contenteditable], [tabindex]"));
-    if (spec.focus && focusable && typeof el.focus === "function") {
+      focusTarget.isContentEditable ||
+      (focusTarget.matches && focusTarget.matches("input, textarea, select, [contenteditable], [tabindex]"));
+    if (spec.focus && focusable && typeof focusTarget.focus === "function") {
       try {
-        el.focus();
+        focusTarget.focus();
       } catch {
         /* ignore */
       }

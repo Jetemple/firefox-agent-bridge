@@ -106,6 +106,7 @@ export async function startOwner(config, fileToken, { startedAt = Date.now(), lo
     envToken: config.sseToken,
     log,
     sessions,
+    ...(config.agentTabIdleMs != null ? { agentTabIdleMs: config.agentTabIdleMs } : {}),
   });
   try {
     await new Promise((resolve, reject) => {
@@ -151,7 +152,10 @@ export function readConfig(env = process.env) {
     env.FIREFOX_BRIDGE_WS_ALLOW_ANY_ORIGIN === "true";
   const tokenFile = env.FIREFOX_BRIDGE_TOKEN_FILE || DEFAULT_TOKEN_PATH;
   const sessionsFile = env.FIREFOX_BRIDGE_SESSIONS_FILE || join(homedir(), ".firefox-mcp", "sessions.json");
-  return { port, host, timeoutMs, ssePort, sseHost, sseToken, allowAnyOrigin, tokenFile, sessionsFile };
+  // FIREFOX_BRIDGE_AGENT_TAB_IDLE_MS: close agent tabs idle this long (0 = never).
+  const idleRaw = env.FIREFOX_BRIDGE_AGENT_TAB_IDLE_MS;
+  const agentTabIdleMs = idleRaw != null && idleRaw !== "" && Number.isFinite(Number(idleRaw)) ? Number(idleRaw) : null;
+  return { port, host, timeoutMs, ssePort, sseHost, sseToken, allowAnyOrigin, tokenFile, sessionsFile, agentTabIdleMs };
 }
 
 async function main() {

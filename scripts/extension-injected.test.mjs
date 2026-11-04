@@ -72,7 +72,7 @@ function valueClass() {
   return C;
 }
 
-test("performType is self-contained and types into a text <input> (regression for FORM_INPUT_TYPES leak)", () => {
+test("performType is self-contained and types into a text <input> (regression for FORM_INPUT_TYPES leak)", async () => {
   const HTMLInputElement = valueClass();
   const HTMLTextAreaElement = valueClass();
   const el = Object.create(HTMLInputElement.prototype);
@@ -92,15 +92,16 @@ test("performType is self-contained and types into a text <input> (regression fo
     HTMLTextAreaElement,
     InputEvent: FakeEvent,
     Event: FakeEvent,
+    setTimeout,
   });
 
-  const res = fn("hello", false);
+  const res = await fn("hello", false);
   assert.equal(res.typed, true);
   assert.equal(res.targetElement, "input#q");
   assert.equal(el.value, "hello");
 });
 
-test("performType appends vs clears, and writes into a <textarea>", () => {
+test("performType appends vs clears, and writes into a <textarea>", async () => {
   const HTMLInputElement = valueClass();
   const HTMLTextAreaElement = valueClass();
   const el = Object.create(HTMLTextAreaElement.prototype);
@@ -120,32 +121,120 @@ test("performType appends vs clears, and writes into a <textarea>", () => {
     HTMLTextAreaElement,
     InputEvent: FakeEvent,
     Event: FakeEvent,
+    setTimeout,
   });
 
-  assert.equal(reserialize(injected.performType, ctx())("X", false).typed, true);
+  assert.equal((await reserialize(injected.performType, ctx())("X", false)).typed, true);
   assert.equal(el.value, "abcX");
-  reserialize(injected.performType, ctx())("Y", true);
+  await reserialize(injected.performType, ctx())("Y", true);
   assert.equal(el.value, "Y");
 });
 
-test("performType inserts into contenteditable and refuses non-editable targets", () => {
-  const editable = { tagName: "DIV", id: "", classList: { length: 0 }, isContentEditable: true, focus: () => {} };
+test("performType inserts into contenteditable and refuses non-editable targets", async () => {
+  const editable = { tagName: "DIV", id: "", classList: { length: 0 }, isContentEditable: true, focus: () => {}, textContent: "" };
   let inserted = null;
   const editableFn = reserialize(injected.performType, {
+    setTimeout,
     document: {
       activeElement: editable,
       execCommand: (cmd, _ui, val) => {
-        if (cmd === "insertText") inserted = val;
+        if (cmd === "insertText") {
+          inserted = val;
+          editable.textContent += val;
+        }
         return true;
       },
     },
   });
-  assert.equal(editableFn("note", false).typed, true);
+  assert.equal((await editableFn("note", false)).typed, true);
   assert.equal(inserted, "note");
 
   const plain = { tagName: "DIV", id: "", classList: { length: 0 }, isContentEditable: false };
-  const plainFn = reserialize(injected.performType, { document: { activeElement: plain } });
-  assert.equal(plainFn("x", false).typed, false);
+  const plainFn = reserialize(injected.performType, { setTimeout, document: { activeElement: plain } });
+  assert.equal((await plainFn("x", false)).typed, false);
+});
+
+// The 2026-11-04 Marketplace bug: the editor swallowed the insert and type
+// still reported success, so an empty box looked filled.
+test("performType reports failure when a rich editor swallows the insert", async () => {
+  const host = { tagName: "DIV", id: "", classList: { length: 0 }, isContentEditable: true, focus: () => {}, textContent: "" };
+  const fn = reserialize(injected.performType, {
+    setTimeout,
+    document: { activeElement: host, execCommand: () => true }, // accepted, nothing rendered
+  });
+  const res = await fn("would you take $30 cash?", false);
+  assert.equal(res.typed, false);
+  assert.match(res.reason, /did not stick/);
+  assert.equal(res.fieldNow, "");
+});
+
+test("performType doesn't count text that was already in the box", async () => {
+  const host = { tagName: "DIV", id: "", classList: { length: 0 }, isContentEditable: true, focus: () => {}, textContent: "hi there" };
+  const fn = reserialize(injected.performType, { setTimeout, document: { activeElement: host, execCommand: () => true } });
+  assert.equal((await fn("hi", false)).typed, false);
+});
+
+test("performType accepts an editor that renders a tick later, with nbsp and paragraphs", async () => {
+  const host = { tagName: "DIV", id: "", classList: { length: 0 }, isContentEditable: true, focus: () => {}, textContent: "" };
+  const fn = reserialize(injected.performType, {
+    setTimeout,
+    document: {
+      activeElement: host,
+      execCommand: (cmd, _ui, val) => {
+        if (cmd === "insertText") setTimeout(() => (host.textContent = val.replace(/ /g, "\u00a0").replace("\n", "")), 250);
+        return true;
+      },
+    },
+  });
+  assert.equal((await fn("pick up\ntomorrow", false)).typed, true);
+});
+
+test("performType types into the editing host when focus sits on a child inside it", async () => {
+  let focused = null;
+  const host = { tagName: "DIV", id: "", classList: { length: 0 }, isContentEditable: true, textContent: "", parentElement: { isContentEditable: false } };
+  host.focus = () => (focused = host);
+  const child = { tagName: "P", id: "", classList: { length: 0 }, isContentEditable: true, focus: () => (focused = child), parentElement: host, textContent: "" };
+  const fn = reserialize(injected.performType, {
+    setTimeout,
+    document: {
+      activeElement: child,
+      execCommand: (cmd, _ui, val) => {
+        if (cmd === "insertText") host.textContent += val;
+        return true;
+      },
+    },
+  });
+  const res = await fn("ok", false);
+  assert.equal(focused, host);
+  assert.equal(res.typed, true);
+});
+
+test("performType reports a form field that rejects the write, hiding password values", async () => {
+  const HTMLInputElement = valueClass();
+  const HTMLTextAreaElement = valueClass();
+  const mk = (type) => {
+    const el = Object.create(HTMLInputElement.prototype);
+    Object.assign(el, { tagName: "INPUT", type, id: "", classList: { length: 0 }, isContentEditable: false });
+    el.dispatchEvent = (e) => { if (e.type === "input") el.__v = "secret!"; return true; }; // framework resets it
+    return el;
+  };
+  const ctx = (el) => ({ document: { activeElement: el }, HTMLInputElement, HTMLTextAreaElement, InputEvent: FakeEvent, Event: FakeEvent, setTimeout });
+  const text = await reserialize(injected.performType, ctx(mk("text")))("hello", false);
+  assert.equal(text.typed, false);
+  assert.equal(text.fieldNow, "secret!");
+  const pw = await reserialize(injected.performType, ctx(mk("password")))("hello", false);
+  assert.equal(pw.typed, false);
+  assert.equal(pw.fieldNow, "(7 chars)");
+});
+
+test("performType accepts a phone mask that reformats the digits", async () => {
+  const HTMLInputElement = valueClass();
+  const HTMLTextAreaElement = valueClass();
+  const el = Object.create(HTMLInputElement.prototype);
+  Object.assign(el, { tagName: "INPUT", type: "tel", id: "", classList: { length: 0 }, isContentEditable: false });
+  el.dispatchEvent = (e) => { if (e.type === "input") el.__v = "(555) 123-4567"; return true; };
+  const fn = reserialize(injected.performType, { document: { activeElement: el }, HTMLInputElement, HTMLTextAreaElement, InputEvent: FakeEvent, Event: FakeEvent, setTimeout });
+  assert.equal((await fn("5551234567", true)).typed, true);
 });
 
 test("performPointer is self-contained, describes the element, and dispatches", () => {
@@ -427,13 +516,13 @@ test("performPointer flags a background tab", () => {
   assert.equal(pointerFn(pointerEl("A"), {}, { visibilityState: "visible" })("click", 1, 1).tabHidden, undefined);
 });
 
-test("performType and performPressKey follow focus into shadow roots and iframes", () => {
+test("performType and performPressKey follow focus into shadow roots and iframes", async () => {
   const frame = pointerEl("IFRAME");
   const browser = { runtime: { getFrameId: () => 9 } };
   const shadowed = pointerEl("X-APP", { shadowRoot: { activeElement: frame } });
   const doc = { activeElement: shadowed, body: {}, documentElement: {} };
   const type = reserialize(injected.performType, { document: doc, browser });
-  assert.equal(type("hi", false).descend.frameId, 9);
+  assert.equal((await type("hi", false)).descend.frameId, 9);
   const key = reserialize(injected.performPressKey, { document: doc, browser, KeyboardEvent: FakeEvent });
   assert.equal(key("Enter", {}).descend.frameId, 9);
 
@@ -666,4 +755,16 @@ test("getTables extracts rows of cell text", () => {
   const res = fn(null);
   assert.equal(res.count, 1);
   assert.deepEqual(plain(res.tables[0]), [["A", "B"], ["1", "2"]]);
+});
+
+// Clicking a rich editor hits a <p> inside it; focusing that <p> does nothing,
+// so the follow-up `type` found no cursor in the box.
+test("performPointer click focuses the editing host, not the child it hit", () => {
+  let focused = null;
+  const host = pointerEl("DIV", { isContentEditable: true, parentElement: { isContentEditable: false } });
+  host.focus = () => (focused = "host");
+  const para = pointerEl("P", { isContentEditable: true, parentElement: host, focus: () => (focused = "para") });
+  const res = pointerFn(para)("click", 3, 4);
+  assert.equal(res.clicked, true);
+  assert.equal(focused, "host");
 });

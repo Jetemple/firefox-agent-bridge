@@ -1,4 +1,4 @@
-// Named sessions: name -> { profile, tabId, runId, url, createdAt }.
+// Named sessions: name -> { profile, tabId, runId, url, createdAt, lastUsedAt? }.
 // Held by the bridge OWNER only; persisted (0600, atomic rename) so a bridge
 // restart keeps sessions while Firefox stays up. The recorded runId is what
 // makes persistence safe: a Firefox/extension restart issues a new runId, so
@@ -19,7 +19,8 @@ function isValidRecord(rec) {
     typeof rec.tabId === "number" &&
     typeof rec.runId === "string" &&
     (rec.url === null || typeof rec.url === "string") &&
-    typeof rec.createdAt === "number"
+    typeof rec.createdAt === "number" &&
+    (rec.lastUsedAt === undefined || typeof rec.lastUsedAt === "number")
   );
 }
 
@@ -78,6 +79,14 @@ export function createSessionStore({ filePath, log = () => {} } = {}) {
     bind,
     get,
     list: () => [...records.entries()].map(([name, rec]) => ({ name, ...rec })),
+    // Record a use, so the idle-tab sweep measures from the last command, not
+    // from when the session was opened. Persisted so a bridge restart keeps it.
+    touch: (name, at = Date.now()) => {
+      const rec = records.get(name);
+      if (!rec) return;
+      rec.lastUsedAt = at;
+      persist();
+    },
     remove: (name) => {
       const had = records.delete(name);
       if (had) persist();

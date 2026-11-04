@@ -281,6 +281,21 @@ test("ff type stops before typing when its click missed", async () => {
   }
 });
 
+test("ff type exits nonzero when the text didn't land", async () => {
+  const owner = await stubOwner({
+    results: {
+      type: { result: { typed: false, reason: "text did not stick: the editor did not accept it", fieldNow: "" } },
+    },
+  });
+  const c = ctx(owner);
+  try {
+    assert.equal(await runCli(["type", "hello", "--focused"], c.opts), 1);
+    assert.match(c.err.join(""), /type failed: text did not stick.*box now holds: ""/);
+  } finally {
+    await owner.close();
+  }
+});
+
 test("ff tabs marks the tabs live sessions own", async () => {
   const owner = await stubOwner({
     results: {

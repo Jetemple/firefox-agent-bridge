@@ -74,6 +74,12 @@ do this to sites they assign to a container. `ff` follows the swap, and
 viewing (`--dry-run` lists them first). It only knows about tabs opened since
 the extension last started, and it covers every agent's tabs, not just yours.
 
+Agents forget, so the bridge also sweeps: every 5 minutes it closes tabs an
+agent opened (or a session owns) that no command has touched for 2 hours. It
+never closes the tab you're viewing, a pinned tab, or the reused 🤖 tab, and it
+drops session records whose tab is gone. `FIREFOX_BRIDGE_AGENT_TAB_IDLE_MS`
+changes the cutoff; `0` turns the sweep off.
+
 ### Containers
 
 `ff containers` lists your Firefox containers. `ff open <url> --container
@@ -210,6 +216,7 @@ anything reaches Firefox. `/health` exposes only name/version/pid/startedAt/conn
 | `FIREFOX_BRIDGE_LOG_DIR` | `~/.firefox-mcp` | Directory for bridge logs (`bridge.log`) |
 | `FIREFOX_BRIDGE_EXPOSE` | `0` | `1` → `npm run setup` provisions secure LAN exposure (token + header) |
 | `FIREFOX_BRIDGE_WS_ALLOW_ANY_ORIGIN` | `0` | `1` → disable the WS origin guard (debug escape hatch) |
+| `FIREFOX_BRIDGE_AGENT_TAB_IDLE_MS` | `7200000` | Close agent tabs idle this long (ms); `0` disables the sweep |
 
 ## Status & caveats
 

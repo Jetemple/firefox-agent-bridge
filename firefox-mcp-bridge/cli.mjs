@@ -391,6 +391,11 @@ export async function runCli(argv, overrides = {}) {
           const hint = prev.hit ? ` (covered by ${prev.hit}; no events sent, --at X,Y acts on whatever is there)` : "";
           throw new CliError(`${parsed.command} failed at (${prev.x}, ${prev.y}): ${prev.reason}${hint}`);
         }
+        // Same for a type whose text didn't land: exit nonzero, never "typed".
+        if (step.tool === "type" && prev?.typed === false) {
+          const now = prev.fieldNow != null ? ` (box now holds: ${JSON.stringify(prev.fieldNow)})` : "";
+          throw new CliError(`type failed: ${prev.reason}${now}`);
+        }
         results.push({ tool: step.tool, result: prev });
       }
     } catch (err) {

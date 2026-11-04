@@ -627,3 +627,100 @@ test("/mcp initialize with no Origin header still succeeds (curl/Node MCP client
     await close();
   }
 });
+
+// --- idle agent-tab sweep ---
+
+function sweepRig({ tabs, agentTabIdleMs = 60_000, runId = "run1" }) {
+  let t = 1_000_000;
+  const relay = stubRelay({
+    profiles: [{ name: "default", runId }],
+    results: { get_tabs_summary: { tabs } },
+  });
+  const sessions = createSessionStore({ filePath: null });
+  const parts = createBridgeHttpServer({
+    relay, sessions, startedAt: 0, fileToken: TOKEN, envToken: null, agentTabIdleMs, now: () => t,
+  });
+  const closedTabs = () => relay.calls.filter((c) => c.tool === "close_tab").map((c) => c.args.tabId);
+  return { relay, sessions, parts, closedTabs, advance: (ms) => (t += ms), now: () => t };
+}
+
+test("idle sweep closes idle agent tabs and leaves the user's, the agent tab, active and pinned tabs", async () => {
+  const tabs = [
+    { id: 1, active: false },                    // the user's own tab
+    { id: 2, active: false, opened: true },      // agent-opened, idle
+    { id: 3, active: false, opened: true, agent: true }, // the reused agent tab
+    { id: 4, active: true, opened: true },       // someone is looking at it
+    { id: 5, active: false, opened: true, pinned: true },
+    { id: 6, active: false },                    // session-bound
+  ];
+  const r = sweepRig({ tabs });
+  r.sessions.bind("job1", { profile: "default", tabId: 6, runId: "run1", url: null });
+  r.sessions.touch("job1", r.now()); // bind stamps wall-clock time; pin it to the rig's clock
+  await r.parts.sweepIdleAgentTabs(); // first sighting of tab 2 starts its clock
+  assert.deepEqual(r.closedTabs(), []);
+  r.advance(61_000);
+  const res = await r.parts.sweepIdleAgentTabs();
+  assert.deepEqual(r.closedTabs().sort(), [2, 6]);
+  assert.deepEqual(res.closed.sort(), [2, 6]);
+  assert.equal(r.sessions.get("job1"), undefined);
+  await r.parts.closeAllSessions();
+});
+
+test("idle sweep measures from the last command, not from when the tab opened", async () => {
+  const r = sweepRig({ tabs: [{ id: 7, active: false }] });
+  r.sessions.bind("busy", { profile: "default", tabId: 7, runId: "run1", url: null });
+  r.sessions.touch("busy", r.now());
+  r.advance(50_000);
+  r.sessions.touch("busy", r.now());
+  r.advance(50_000); // 100s since bind, 50s since last use
+  await r.parts.sweepIdleAgentTabs();
+  assert.deepEqual(r.closedTabs(), []);
+  assert.ok(r.sessions.get("busy"));
+  r.advance(20_000); // now 70s since last use
+  await r.parts.sweepIdleAgentTabs();
+  assert.deepEqual(r.closedTabs(), [7]);
+  await r.parts.closeAllSessions();
+});
+
+test("idle sweep drops session records Firefox can no longer serve", async () => {
+  const r = sweepRig({ tabs: [{ id: 8, active: false }], runId: "run2" });
+  r.sessions.bind("old-run", { profile: "default", tabId: 8, runId: "run1", url: null });
+  r.sessions.bind("gone-tab", { profile: "default", tabId: 99, runId: "run2", url: null });
+  r.sessions.bind("other-profile", { profile: "work", tabId: 8, runId: "x", url: null });
+  const res = await r.parts.sweepIdleAgentTabs();
+  assert.deepEqual(res.dropped.sort(), ["gone-tab", "old-run"]);
+  assert.deepEqual(r.closedTabs(), []); // tab 8 isn't the agent's in this run
+  assert.ok(r.sessions.get("other-profile")); // can't see that profile: keep it
+  await r.parts.closeAllSessions();
+});
+
+test("idle sweep is off when agentTabIdleMs is 0", async () => {
+  const r = sweepRig({ tabs: [{ id: 2, active: false, opened: true }], agentTabIdleMs: 0 });
+  r.advance(10 ** 9);
+  await r.parts.sweepIdleAgentTabs();
+  assert.equal(r.relay.calls.length, 0);
+  await r.parts.closeAllSessions();
+});
+
+test("/dispatch through a session restarts that tab's idle clock", async () => {
+  const r = sweepRig({ tabs: [{ id: 9, active: false }] });
+  r.sessions.bind("s", { profile: "default", tabId: 9, runId: "run1", url: null });
+  r.sessions.touch("s", r.now());
+  const { port, close } = await listen(r.parts);
+  try {
+    r.advance(59_000);
+    const res = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ tool: "get_page_text", args: {}, session: "s" }),
+    });
+    assert.equal(res.status, 200);
+    r.advance(30_000); // 89s since bind, 30s since the command
+    await r.parts.sweepIdleAgentTabs();
+    assert.deepEqual(r.closedTabs(), []);
+    assert.equal(r.sessions.get("s").lastUsedAt, r.now() - 30_000);
+  } finally {
+    await r.parts.closeAllSessions();
+    await close();
+  }
+});
