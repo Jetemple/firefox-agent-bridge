@@ -189,6 +189,48 @@ test("performType accepts an editor that renders a tick later, with nbsp and par
   assert.equal((await fn("pick up\ntomorrow", false)).typed, true);
 });
 
+// A hidden tab: the box has focus but no caret, so the editor drops the insert
+// unless performType places one. Only text typed with a caret inside lands.
+function caretEditor(textContent = "", caretInside = false) {
+  const host = { tagName: "DIV", id: "", classList: { length: 0 }, isContentEditable: true, focus: () => {}, textContent };
+  host.contains = (node) => node === host;
+  const sel = {
+    rangeCount: caretInside ? 1 : 0,
+    anchorNode: caretInside ? host : null,
+    added: [],
+    removeAllRanges() { this.rangeCount = 0; this.anchorNode = null; },
+    addRange(r) { this.added.push(r); this.rangeCount = 1; this.anchorNode = r.node; },
+  };
+  const fn = reserialize(injected.performType, {
+    setTimeout,
+    getSelection: () => sel,
+    document: {
+      activeElement: host,
+      createRange: () => ({ selectNodeContents(n) { this.node = n; }, collapse(toStart) { this.toStart = toStart; } }),
+      execCommand: (cmd, _ui, val) => {
+        if (cmd === "insertText" && sel.rangeCount && host.contains(sel.anchorNode)) host.textContent += val;
+        return true;
+      },
+    },
+  });
+  return { fn, host, sel };
+}
+
+test("performType puts the caret at the end of a focused box that has none (hidden tab)", async () => {
+  const { fn, host, sel } = caretEditor("hi ");
+  assert.equal((await fn("there", false)).typed, true);
+  assert.equal(host.textContent, "hi there");
+  assert.equal(sel.added.length, 1);
+  assert.equal(sel.added[0].node, host);
+  assert.equal(sel.added[0].toStart, false);
+});
+
+test("performType keeps a caret that's already in the box", async () => {
+  const { fn, sel } = caretEditor("", true);
+  assert.equal((await fn("x", false)).typed, true);
+  assert.equal(sel.added.length, 0);
+});
+
 test("performType types into the editing host when focus sits on a child inside it", async () => {
   let focused = null;
   const host = { tagName: "DIV", id: "", classList: { length: 0 }, isContentEditable: true, textContent: "", parentElement: { isContentEditable: false } };

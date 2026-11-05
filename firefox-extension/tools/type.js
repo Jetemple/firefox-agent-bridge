@@ -44,6 +44,20 @@
       return host;
     }
 
+    // focus() in a hidden tab leaves no caret, and insertText then has nowhere
+    // to go (2026-11-04, matched trials on Facebook's composer). A visible tab
+    // gets one from focus(). Put the caret at the end unless it's already in
+    // the box, so an existing cursor position is kept.
+    function ensureCaret(host) {
+      const sel = globalThis.getSelection?.();
+      if (!sel || (sel.rangeCount && host.contains(sel.anchorNode))) return;
+      const range = document.createRange();
+      range.selectNodeContents(host);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+
     function describe(el) {
       const id = el.id ? "#" + el.id : "";
       const cls = el.classList && el.classList.length ? "." + Array.from(el.classList).join(".") : "";
@@ -96,6 +110,7 @@
       // A stuck or still-loading editor swallows the insert without an error.
       const host = editingHost(el);
       host.focus();
+      ensureCaret(host);
       const before = clearFirst ? "" : host.textContent;
       if (clearFirst) {
         document.execCommand("selectAll", false, null);
