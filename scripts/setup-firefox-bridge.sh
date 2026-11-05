@@ -1,33 +1,20 @@
 #!/usr/bin/env bash
 #
-# setup-firefox-bridge.sh — one-shot setup for the owned Firefox MCP bridge.
+# setup-firefox-bridge.sh: set up the bridge and the `ff` CLI. Idempotent.
 #
-# Idempotent. Re-run any time — in particular whenever your LAN IP changes,
-# then re-upload the rebuilt firefox-bridge.plugin in Cowork.
+#   npm run setup                  install deps, put `ff` on PATH
+#   npm run setup -- --desktop     also register the MCP server with Claude Desktop
+#   npm run setup -- --cowork      --desktop, plus LAN exposure with a token and a
+#                                  firefox-bridge.plugin to upload to Cowork
 #
-# SECURITY MODEL
-#   The SSE endpoint can drive your logged-in browser, so by default the bridge
-#   binds it to localhost (127.0.0.1) only — nothing on your network can reach it.
+# FIREFOX_BRIDGE_EXPOSE=1 is the same as --cowork. Re-run --cowork whenever your
+# LAN IP changes, then re-upload the rebuilt plugin.
 #
-#   For a client that connects over the network (e.g. Cowork, which reaches the
-#   host over its LAN IP), opt in to LAN exposure — which ALWAYS comes with a token:
+# Security: by default the HTTP endpoint binds 127.0.0.1 only. --cowork binds
+# 0.0.0.0 and ALWAYS requires a generated token (stored in .firefox-bridge-token,
+# gitignored); this script has no way to expose the endpoint without one.
 #
-#       FIREFOX_BRIDGE_EXPOSE=1 npm run setup
-#
-#   That generates a secret token (stored in ./.firefox-bridge-token, gitignored),
-#   binds the SSE endpoint on 0.0.0.0, requires the token on every request, and
-#   bakes a matching Authorization header into firefox-bridge.plugin. There is no
-#   way to expose the endpoint WITHOUT a token through this script.
-#
-# It will:
-#   1. install the bridge's node deps
-#   2. detect your host LAN IP   (override: FIREFOX_BRIDGE_HOST_IP=x.x.x.x)
-#   3. register the bridge with Claude Desktop (with the SSE env in expose mode)
-#   4. (re)build ./firefox-bridge.plugin
-#   5. health-check the bridge ports
-#
-# Two steps stay manual (GUI — can't be scripted): uploading the plugin to
-# Cowork, and loading the extension in Firefox. The script prints both.
+# macOS only for now (LAN IP detection uses ipconfig/route).
 
 set -euo pipefail
 
@@ -41,12 +28,19 @@ BRIDGE_DIR="$REPO_ROOT/firefox-mcp-bridge"
 EXT_MANIFEST="$REPO_ROOT/firefox-extension/manifest.json"
 SECURE_CONFIG="$REPO_ROOT/scripts/secure-config.mjs"
 
-# Expose mode: 1 / true / yes opt in to a token-protected LAN binding.
-EXPOSE_RAW="${FIREFOX_BRIDGE_EXPOSE:-0}"
-case "$EXPOSE_RAW" in
-  1 | true | yes | on) EXPOSE_ON=1 ;;
-  *) EXPOSE_ON=0 ;;
-esac
+DESKTOP_ON=0
+EXPOSE_ON=0
+case "${FIREFOX_BRIDGE_EXPOSE:-0}" in 1 | true | yes | on) EXPOSE_ON=1 ;; esac
+for arg in "$@"; do
+  case "$arg" in
+    --desktop) DESKTOP_ON=1 ;;
+    --cowork) EXPOSE_ON=1 ;;
+    -h | --help) sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
+  esac
+done
+# Cowork reaches a bridge that Claude Desktop spawns with the LAN env.
+[ "$EXPOSE_ON" = "1" ] && DESKTOP_ON=1
 
 c_blue=$'\033[1;34m'; c_green=$'\033[1;32m'; c_yellow=$'\033[1;33m'; c_reset=$'\033[0m'
 log()  { printf '%s▶ %s%s\n' "$c_blue"   "$*" "$c_reset"; }
@@ -68,6 +62,8 @@ if (cd "$BRIDGE_DIR" && npm link >/dev/null 2>&1); then
 else
   warn "npm link failed — you can still run it as: node $BRIDGE_DIR/cli.mjs"
 fi
+
+if [ "$DESKTOP_ON" = "1" ]; then
 
 # 2. detect LAN IP ----------------------------------------------------------
 detect_ip() {
@@ -96,7 +92,7 @@ if [ "$EXPOSE_ON" = "1" ]; then
 else
   SSE_BIND_HOST="127.0.0.1"
   SSE_URL="http://127.0.0.1:$SSE_PORT/mcp"
-  ok "Localhost-only mode (default): SSE binds 127.0.0.1. Use FIREFOX_BRIDGE_EXPOSE=1 for Cowork/LAN."
+  ok "Localhost-only: HTTP endpoint binds 127.0.0.1."
 fi
 
 # 4. register bridge with Claude Desktop ------------------------------------
@@ -108,6 +104,7 @@ else
   node "$REPO_ROOT/scripts/install-firefox-mcp-bridge.mjs"
 fi
 
+if [ "$EXPOSE_ON" = "1" ]; then
 # 5. (re)build the Cowork plugin bundle -------------------------------------
 log "Building $PLUGIN_OUT …"
 STAGE="$(mktemp -d)"
@@ -126,7 +123,7 @@ FIREFOX_BRIDGE_SSE_TOKEN="$TOKEN" node "$SECURE_CONFIG" plugin "$SSE_URL" > "$ST
 rm -f "$PLUGIN_OUT"
 ( cd "$STAGE" && zip -q -X -r "$PLUGIN_OUT" .mcp.json .claude-plugin )
 ok "Built $PLUGIN_OUT  (firefox-bridge → $SSE_URL)"
-command -v open >/dev/null 2>&1 && open -R "$PLUGIN_OUT" 2>/dev/null || true
+fi
 
 # 6. health check -----------------------------------------------------------
 log "Checking bridge ports…"
@@ -134,35 +131,25 @@ port_up() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 port_up "$WS_PORT"  && ok "WS relay listening on :$WS_PORT"     || warn "Nothing on :$WS_PORT — restart Claude Desktop to spawn the bridge."
 port_up "$SSE_PORT" && ok "SSE endpoint listening on :$SSE_PORT" || warn "Nothing on :$SSE_PORT — restart Claude Desktop to spawn the bridge."
 
+fi
+
 # 7. remaining manual steps -------------------------------------------------
 cat <<EOF
 
 ${c_blue}────────────────────────────────────────────────────────────${c_reset}
- Two steps left (GUI — can't be scripted):
+ Load the extension: Firefox → about:debugging#/runtime/this-firefox
+   → "Load Temporary Add-on…" → $EXT_MANIFEST
 
-  ${c_green}1) Cowork${c_reset}  → Settings → ${c_green}Upload local plugin${c_reset}
-     choose:  $PLUGIN_OUT
-     (Finder was opened to it for you.)
-
-  ${c_green}2) Firefox${c_reset} → about:debugging#/runtime/this-firefox
-     → "Load Temporary Add-on…" → choose:
-        $EXT_MANIFEST
-
-  Try it:  ff status   ·   ff tabs   ·   ff nav example.com   ·   ff --help
-
- Restart Claude Desktop so it respawns the bridge with the new settings.
- IP changed / new network?  Re-run this script and re-upload the .plugin.
+ Try it:  ff status   ·   ff tabs   ·   ff nav example.com   ·   ff --help
 EOF
+if [ "$DESKTOP_ON" = "1" ]; then
+  echo " Restart Claude Desktop so it respawns the bridge with the new settings."
+fi
 if [ "$EXPOSE_ON" = "1" ]; then
   cat <<EOF
- ${c_yellow}Exposed on the LAN with a token.${c_reset} The plugin carries the matching
- Authorization header; keep .firefox-bridge-token secret (it's gitignored).
-EOF
-else
-  cat <<EOF
- ${c_yellow}Localhost-only.${c_reset} Cowork reaches the host over the LAN, so it won't
- connect in this mode — re-run with ${c_green}FIREFOX_BRIDGE_EXPOSE=1${c_reset} to enable it
- securely (token auto-generated).
+ Cowork → Settings → Upload local plugin → $PLUGIN_OUT
+ ${c_yellow}Exposed on the LAN with a token.${c_reset} Keep .firefox-bridge-token secret.
+ New network or IP?  Re-run with --cowork and re-upload the plugin.
 EOF
 fi
 printf '%s────────────────────────────────────────────────────────────%s\n' "$c_blue" "$c_reset"

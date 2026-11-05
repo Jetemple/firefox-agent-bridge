@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Owned MCP bridge: relays Claude Desktop tool calls over a local WebSocket to a Firefox extension.",
+  "description": "Local bridge for Agent Bridge for Firefox: the ff CLI and an MCP server (stdio and Streamable HTTP) relaying to the Firefox extension.",
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "firefox-mcp-bridge": "./index.mjs",
     "ff": "./cli.mjs"

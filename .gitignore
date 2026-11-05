@@ -25,3 +25,6 @@ playwright-report/
 .vscode/
 .idea/
 .amo-upload-uuid
+
+# agent plans/specs never ship in this public repo
+/docs/
