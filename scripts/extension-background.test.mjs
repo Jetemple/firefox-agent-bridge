@@ -9,6 +9,7 @@ const SOURCE = readFileSync(new URL("../firefox-extension/background.js", import
 const NAVIGATE_SOURCE = readFileSync(new URL("../firefox-extension/tools/navigate.js", import.meta.url), "utf8");
 const OPEN_TAB_SOURCE = readFileSync(new URL("../firefox-extension/tools/open-tab.js", import.meta.url), "utf8");
 const CONTAINERS_SOURCE = readFileSync(new URL("../firefox-extension/tools/containers.js", import.meta.url), "utf8");
+const TAB_GROUPS_SOURCE = readFileSync(new URL("../firefox-extension/tools/tab-groups.js", import.meta.url), "utf8");
 const RESTRICTED_SOURCE = readFileSync(new URL("../firefox-extension/restricted.js", import.meta.url), "utf8");
 const MARKER_SOURCE = readFileSync(new URL("../firefox-extension/marker.js", import.meta.url), "utf8");
 
@@ -84,7 +85,7 @@ function loadBackground({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
   return { FF: sandbox.FFBridge, stored };
 }
 
-function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor, contextualIdentities } = {}) {
+function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor, contextualIdentities, tabGroups } = {}) {
   const listeners = () => ({ addListener: () => {} });
   const stored = { ...storageData };
   const sandbox = {
@@ -116,6 +117,7 @@ function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor, contextualI
       alarms: { create: () => {}, onAlarm: listeners() },
       tabs,
       ...(contextualIdentities ? { contextualIdentities } : {}),
+      ...(tabGroups ? { tabGroups } : {}),
     },
   };
   createContext(sandbox);
@@ -126,6 +128,7 @@ function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor, contextualI
   runInContext(SOURCE, sandbox, { filename: "background.js" });
   runInContext(NAVIGATE_SOURCE, sandbox, { filename: "navigate.js" });
   runInContext(CONTAINERS_SOURCE, sandbox, { filename: "containers.js" });
+  runInContext(TAB_GROUPS_SOURCE, sandbox, { filename: "tab-groups.js" });
   runInContext(OPEN_TAB_SOURCE, sandbox, { filename: "open-tab.js" });
   // `sandbox` is the vm's global: setting sandbox.document lets a test drive
   // FF.pageStamp, whose free `document` reference resolves to it.
@@ -820,4 +823,60 @@ test("injectDescending replays in the named frame with the new args and reports 
 
   sandbox.browser.scripting.executeScript = async () => [{ result: { descend: { frameId: 8 } } }];
   await assert.rejects(FF.injectDescending(1, () => {}, []), (err) => err.code === "SCRIPT_FAILED");
+});
+
+// --- tab groups on open_tab -----------------------------------------------
+
+function groupingTabs(extra = {}) {
+  const calls = [];
+  const tab = { id: 61, windowId: 3, pinned: false, groupId: -1 };
+  return {
+    calls,
+    tabs: {
+      create: async (opts) => (calls.push(["create", opts]), { ...tab }),
+      get: async () => ({ ...tab, url: "https://x.com/", status: "complete" }),
+      group: async (opts) => (calls.push(["group", opts]), 200),
+      remove: async (id) => calls.push(["remove", id]),
+      ...extra,
+    },
+    tabGroups: {
+      query: async () => [],
+      get: async () => ({ id: 200, title: "", color: "grey" }),
+      update: async (id, props) => (calls.push(["update", id, props]), { id, title: props.title, color: props.color ?? "grey" }),
+    },
+  };
+}
+
+test("open_tab --group opens the tab and puts it in a new group titled that name", async () => {
+  const g = groupingTabs();
+  const { FF } = loadWithTools({ tabs: g.tabs, tabGroups: g.tabGroups });
+  const result = await FF.tools.open_tab({ url: "x.com", group: "TV hunt", groupColor: "orange" });
+  assert.deepEqual(g.calls.map((c) => c[0]), ["create", "group", "update"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(g.calls[1][1])), { tabIds: [61], createProperties: { windowId: 3 } });
+  assert.deepEqual(JSON.parse(JSON.stringify(g.calls[2][2])), { title: "TV hunt", color: "orange" });
+  assert.equal(result.group, "TV hunt");
+  assert.equal(result.tabId, 61);
+});
+
+test("open_tab with a bad group color opens nothing", async () => {
+  const g = groupingTabs();
+  const { FF } = loadWithTools({ tabs: g.tabs, tabGroups: g.tabGroups });
+  await assert.rejects(FF.tools.open_tab({ url: "x.com", group: "TV", groupColor: "teal" }), /Unknown group color/);
+  assert.equal(g.calls.length, 0);
+});
+
+test("open_tab --group on a Firefox without tab groups opens nothing", async () => {
+  const g = groupingTabs();
+  delete g.tabs.group;
+  const { FF } = loadWithTools({ tabs: g.tabs });
+  await assert.rejects(FF.tools.open_tab({ url: "x.com", group: "TV" }), /Firefox 139/);
+  assert.equal(g.calls.length, 0);
+});
+
+test("open_tab closes the tab it opened when grouping it fails", async () => {
+  const g = groupingTabs({ group: async () => { throw new Error("group exploded"); } });
+  const { FF } = loadWithTools({ tabs: g.tabs, tabGroups: g.tabGroups });
+  await assert.rejects(FF.tools.open_tab({ url: "x.com", group: "TV" }), /group exploded/);
+  assert.deepEqual(g.calls.map((c) => c[0]), ["create", "remove"]);
+  assert.equal(g.calls[1][1], 61);
 });

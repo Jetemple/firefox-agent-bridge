@@ -90,6 +90,17 @@ open in" rule can move it. `ff tabs` marks container tabs `{Gmail}`. An open
 tab can't change containers, so to keep working in one, name a session:
 `ff open <url> --container Gmail --as mail`, then `ff -s mail <command>`.
 
+### Tab groups
+
+Firefox's native tab groups (Firefox 139+). `ff open <url> --group "TV hunt"`
+opens the page straight into the group with that title (case-insensitive),
+creating it if there's none; add `--color` to set its color (grey, blue, red,
+yellow, green, pink, purple, cyan, orange). `ff group <name> [TAB_ID...]`
+moves open tabs in (no ids: `--tab N`, `--here`, `-s NAME`, or the agent tab),
+`--collapse`/`--expand` folds the group, and `ff ungroup [TAB_ID...]` takes
+tabs out. `ff groups` lists them, and `ff tabs` marks grouped tabs `‹TV hunt›`.
+Grouping never changes which tab you're viewing. Pinned tabs can't join a group.
+
 ## Sessions & profiles
 
 Multiple agents (or one agent juggling tabs) can each pin a named session to a

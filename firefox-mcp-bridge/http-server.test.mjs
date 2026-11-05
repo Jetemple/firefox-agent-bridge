@@ -182,6 +182,16 @@ test("validateDispatchBody passes open_tab's marker label through (ff open --as)
   assert.equal(validateDispatchBody({ tool: "open_tab", args: { url: "x.com", label: "Bad Name" } }).ok, false);
 });
 
+test("validateDispatchBody checks tab group args", () => {
+  assert.equal(validateDispatchBody({ tool: "open_tab", args: { url: "x.com", group: "TV", groupColor: "red" } }).ok, true);
+  assert.equal(validateDispatchBody({ tool: "open_tab", args: { url: "x.com", group: "TV", groupColor: "teal" } }).ok, false);
+  assert.equal(validateDispatchBody({ tool: "group_tabs", args: { group: "TV", tabIds: [1, 2], collapsed: true } }).ok, true);
+  assert.equal(validateDispatchBody({ tool: "group_tabs", args: { tabId: 1 } }).ok, false);
+  assert.equal(validateDispatchBody({ tool: "group_tabs", args: { group: "TV", tabIds: [] } }).ok, false);
+  assert.equal(validateDispatchBody({ tool: "ungroup_tabs", args: { tabIds: [3] } }).ok, true);
+  assert.equal(validateDispatchBody({ tool: "get_tab_groups" }).ok, true);
+});
+
 test("validateDispatchBody passes open_tab's container through and accepts get_containers", () => {
   const r = validateDispatchBody({ tool: "open_tab", args: { url: "x.com", container: "Gmail" } });
   assert.equal(r.ok, true);

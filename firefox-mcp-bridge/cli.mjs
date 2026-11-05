@@ -382,6 +382,9 @@ export async function runCli(argv, overrides = {}) {
           if (step.tool === "get_containers" && /^UNKNOWN_TOOL:/.test(err?.message ?? "")) {
             throw new CliError("the Firefox extension predates container support: reload it (0.2.3+) and retry");
           }
+          if (/group/.test(step.tool) && /^UNKNOWN_TOOL:/.test(err?.message ?? "")) {
+            throw new CliError("the Firefox extension predates tab group support: reload it (0.2.5+) and retry");
+          }
           throw err;
         }
         // A missed pointer action stops the composite here: the next step, or
@@ -419,7 +422,7 @@ export async function runCli(argv, overrides = {}) {
       deps.stdout(
         parsed.flags.json
           ? `${JSON.stringify(bound, null, 2)}\n`
-          : `session ${bound.name} → tab ${bound.tabId} (profile ${bound.profile})${opened.container ? ` in container ${opened.container}` : ""}\n`,
+          : `session ${bound.name} → tab ${bound.tabId} (profile ${bound.profile})${opened.container ? ` in container ${opened.container}` : ""}${opened.group != null ? ` in group ‹${opened.group}›` : ""}\n`,
       );
       return 0;
     }

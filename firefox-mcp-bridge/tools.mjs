@@ -17,6 +17,14 @@ const tabId = z
   .describe("Optional: tab ID. Defaults to the agent tab (the one navigate drives); the active tab before the first navigate.")
   .optional();
 
+const tabIds = z
+  .array(z.number())
+  .min(1)
+  .describe("Optional: several tab IDs (overrides tabId).")
+  .optional();
+const groupName = z.string().trim().min(1).max(100);
+const groupColor = z.enum(["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"]);
+
 // Coordinates are relative to `frameId`'s viewport. Pass find_element's frameId
 // and ref straight through to the pointer tools.
 const frameId = z
@@ -38,7 +46,7 @@ export const TOOLS = [
   {
     name: "get_tabs_summary",
     description:
-      "Returns a summary of all open browser tabs (id, url, title, active, pinned, windowId; agent: true marks the agent tab; container names the Firefox container a tab is in).",
+      "Returns a summary of all open browser tabs (id, url, title, active, pinned, windowId; agent: true marks the agent tab; container names the Firefox container a tab is in; group names its tab group).",
     inputSchema: undefined,
   },
   {
@@ -46,6 +54,28 @@ export const TOOLS = [
     description:
       "Lists the Firefox containers (name, cookieStoreId, color, icon). Pass a name to open_tab's container to open a tab in it.",
     inputSchema: undefined,
+  },
+  {
+    name: "get_tab_groups",
+    description: "Lists Firefox's native tab groups (id, title, color, collapsed, windowId, tabIds).",
+    inputSchema: undefined,
+  },
+  {
+    name: "group_tabs",
+    description:
+      "Put tabs in a tab group by title: joins the group with that title (case-insensitive) or creates it. Never changes the active tab. Omit tabId/tabIds for the agent tab.",
+    inputSchema: {
+      group: groupName.describe("Group title to join or create."),
+      tabId,
+      tabIds,
+      color: groupColor.describe("Optional: set the group's color.").optional(),
+      collapsed: z.boolean().describe("Optional: collapse (true) or expand (false) the group.").optional(),
+    },
+  },
+  {
+    name: "ungroup_tabs",
+    description: "Take tabs out of their tab group. Omit tabId/tabIds for the agent tab.",
+    inputSchema: { tabId, tabIds },
   },
   {
     name: "navigate",
@@ -79,6 +109,8 @@ export const TOOLS = [
         .min(1)
         .describe("Optional: Firefox container to open the tab in, by name (case-insensitive) or cookieStoreId. See get_containers.")
         .optional(),
+      group: groupName.describe("Optional: tab group to put the new tab in, joined by title (case-insensitive) or created.").optional(),
+      groupColor: groupColor.describe("Optional: color for the group (applies to an existing group too).").optional(),
     },
   },
   {

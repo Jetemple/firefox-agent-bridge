@@ -350,6 +350,9 @@ const NO_TAB = new Set([
   "set_profile_name",
   "open_tab",
   "get_containers",
+  "get_tab_groups",
+  "group_tabs",
+  "ungroup_tabs",
 ]);
 // Tools that need the resolved tab (for windowId/activation) but are allowed on
 // restricted URLs (captureVisibleTab does not inject script).
@@ -362,6 +365,7 @@ async function runTool(tool, args) {
   // A tab id the agent was handed may belong to a tab that has since been
   // replaced (see "replaced tabs"); act on the replacement instead.
   if (typeof args.tabId === "number") args = { ...args, tabId: await awaitReplacement(args.tabId) };
+  if (Array.isArray(args.tabIds)) args = { ...args, tabIds: await Promise.all(args.tabIds.map(awaitReplacement)) };
   if (NO_TAB.has(tool)) return handler(args);
 
   let tab = await resolveTab(args.tabId);

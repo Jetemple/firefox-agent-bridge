@@ -15,6 +15,9 @@ const EXPECTED = [
   // open_tab (Task 3)
   "open_tab",
   "get_containers",
+  "get_tab_groups",
+  "group_tabs",
+  "ungroup_tabs",
   // group A — tab tools
   "close_tab",
   "activate_tab",

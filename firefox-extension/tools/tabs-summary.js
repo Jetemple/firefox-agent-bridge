@@ -6,6 +6,7 @@
   FF.tools.get_tabs_summary = async () => {
     const tabs = await browser.tabs.query({});
     const containers = (await FF.containerNames?.()) ?? new Map();
+    const groups = (await FF.groupNames?.()) ?? new Map();
     return {
       tabs: tabs.map((t) => ({
         id: t.id,
@@ -18,6 +19,8 @@
         windowId: t.windowId,
         // Only on tabs inside a container (Firefox's contextual identities).
         ...(containers.has(t.cookieStoreId) ? { container: containers.get(t.cookieStoreId) } : {}),
+        // Only on tabs inside a native tab group (Firefox 139+).
+        ...(groups.has(t.groupId) ? { group: groups.get(t.groupId) } : {}),
         // Only on agent tabs, to keep the common case's payload unchanged:
         // `agent` is the tab un-targeted commands drive, `opened` any tab the
         // agent opened (what close_agent_tabs would close).

@@ -6,7 +6,7 @@
 const GLOBAL_BOOL = new Set(["json", "no-autostart", "replace", "here"]);
 const GLOBAL_VALUE = new Set(["session", "profile", "timeout", "wait-for", "wait-timeout"]);
 const BOOL_FLAGS = new Set([
-  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "mine", "dry-run", "ctrl", "alt", "shift", "meta", "foreground",
+  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "mine", "dry-run", "ctrl", "alt", "shift", "meta", "foreground", "collapse", "expand",
 ]);
 
 function tokenize(argv) {
@@ -173,23 +173,43 @@ const BUILDERS = {
     return [{ tool: "get_tables", args }];
   },
   open: (pos, flags) => {
-    if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--container C] [--profile P] [--foreground]");
+    if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--container C] [--group G [--color C]] [--profile P] [--foreground]");
     const args = { url: pos[0], active: !!flags.foreground };
     // --as names a session; hand it to the extension as the tab-title marker
     // label so the strip shows "🤖 <name> · …". Omitted → emoji-only stamp.
     if (flags.as != null) args.label = flags.as;
+    // Preflights: an extension too old for --container (0.2.3) or --group
+    // (0.2.5) would drop the unknown arg and open the page anyway. It doesn't
+    // know the matching list tool either, so that step fails first and
+    // nothing opens.
+    const steps = [];
     if ("container" in flags) {
       if (typeof flags.container !== "string" || !flags.container.trim()) {
         throw new UsageError("missing value for --container (see ff containers)");
       }
       args.container = flags.container;
-      // Preflight: an extension older than 0.2.3 would drop the unknown
-      // container arg and open the page outside the container. It doesn't
-      // know get_containers either, so this fails first and nothing opens.
-      return [{ tool: "get_containers", args: {} }, { tool: "open_tab", args }];
+      steps.push({ tool: "get_containers", args: {} });
     }
-    return [{ tool: "open_tab", args }];
+    if ("group" in flags) {
+      args.group = groupName(flags.group);
+      if (flags.color != null) args.groupColor = String(flags.color);
+      steps.push({ tool: "get_tab_groups", args: {} });
+    } else if (flags.color != null) {
+      throw new UsageError("--color goes with --group");
+    }
+    return [...steps, { tool: "open_tab", args }];
   },
+  groups: () => [{ tool: "get_tab_groups", args: {} }],
+  group: (pos, flags) => {
+    if (!pos[0]) throw new UsageError("usage: ff group <name> [TAB_ID...] [--color C] [--collapse|--expand]");
+    if (flags.collapse && flags.expand) throw new UsageError("pick one of --collapse and --expand");
+    const args = groupTargets({ group: groupName(pos[0]) }, pos.slice(1), flags);
+    if (flags.color != null) args.color = String(flags.color);
+    if (flags.collapse) args.collapsed = true;
+    if (flags.expand) args.collapsed = false;
+    return [{ tool: "group_tabs", args }];
+  },
+  ungroup: (pos, flags) => [{ tool: "ungroup_tabs", args: groupTargets({}, pos, flags) }],
   containers: () => [{ tool: "get_containers", args: {} }],
   sessions: () => [{ tool: "session_list", args: {} }],
   session: (pos) => {
@@ -222,6 +242,19 @@ for (const [name, tool] of Object.entries(POINTER_TOOLS)) {
     if (!pos[0] && !flags.css) throw new UsageError(`usage: ff ${name} <query> [--css SEL] | --at X,Y`);
     return [findStep(pos[0], flags), pointerStep(tool, flags)];
   };
+}
+
+function groupName(value) {
+  if (typeof value !== "string" || !value.trim()) throw new UsageError("a tab group needs a name (see ff groups)");
+  return value.trim();
+}
+
+// Tab ids listed after the command, or else the usual --tab/--here/session/agent tab.
+function groupTargets(args, ids, flags) {
+  if (!ids.length) return withTab(args, flags);
+  if (flags.tab != null || flags.here) throw new UsageError("list tab ids or use --tab/--here, not both");
+  args.tabIds = ids.map((id) => num(id, "tab id"));
+  return args;
 }
 
 function findStep(query, flags) {
@@ -353,11 +386,12 @@ export function parseCli(argv) {
 
 // One `ff tabs` line. [name] is the session that owns the tab, [opened] a tab an
 // agent opened without naming a session: both are someone's work in progress.
-// {name} is the Firefox container the tab lives in.
+// {name} is the Firefox container the tab lives in, ‹name› its tab group.
 export function formatTab(t) {
   const owner = t.session ? `[${t.session}] ` : t.opened && !t.agent ? "[opened] " : "";
   const container = t.container ? `{${t.container}} ` : "";
-  return `${t.id}${t.active ? "*" : " "}  ${t.agent ? "🤖 " : ""}${owner}${container}${t.title ?? ""} — ${t.url ?? ""}`;
+  const group = t.group != null ? `‹${t.group || "untitled"}› ` : "";
+  return `${t.id}${t.active ? "*" : " "}  ${t.agent ? "🤖 " : ""}${owner}${group}${container}${t.title ?? ""} — ${t.url ?? ""}`;
 }
 
 export function formatResult(command, results, { json = false } = {}) {
@@ -400,7 +434,20 @@ export function formatResult(command, results, { json = false } = {}) {
       return `profile named "${last?.name}"`; // set_profile_name result
     }
     case "open":
-      return `tab ${last?.tabId}${last?.container ? ` in container ${last.container}` : ""}`;
+      return `tab ${last?.tabId}${last?.container ? ` in container ${last.container}` : ""}${last?.group != null ? ` in group ‹${last.group}›` : ""}`;
+    case "groups": {
+      const groups = last?.groups ?? [];
+      if (!groups.length) return "no tab groups";
+      return groups
+        .map((g) => `‹${g.title || "untitled"}›  ${g.color ?? ""}${g.collapsed ? " collapsed" : ""}  window ${g.windowId}  tabs ${g.tabIds.join(", ") || "none"}`)
+        .join("\n");
+    }
+    case "group":
+      return `${last?.created ? "created" : "joined"} ‹${last?.group}› (${last?.color}${last?.collapsed ? ", collapsed" : ""}): tab ${last?.tabIds?.join(", ")}`;
+    case "ungroup":
+      return last?.ungrouped?.length
+        ? `ungrouped tab ${last.ungrouped.join(", ")}${last.notGrouped?.length ? ` (${last.notGrouped.join(", ")} wasn't in a group)` : ""}`
+        : "not in a group";
     case "containers": {
       const containers = last?.containers ?? [];
       if (!containers.length) return "no containers (none exist, or containers are turned off in this profile)";
@@ -434,6 +481,9 @@ Tabs:    ff tabs                        ff tab close|activate [--tab N]
          ff nav <url> [--tab N]         ff reload [--hard] | back | forward
          ff open <url> [--as NAME] [--container C] [--foreground]
          ff containers                  list containers (by name or id for --container)
+         ff open <url> --group G [--color C]  open straight into a tab group
+         ff groups                      ff group <name> [TAB_ID...] [--color C] [--collapse|--expand]
+         ff ungroup [TAB_ID...]         (no ids: --tab N, --here, -s NAME, or the agent tab)
 Session: ff sessions | ff session rm NAME | ff bind NAME --tab N
          ff -s NAME <command>           any tab command runs against the session
 Profile: ff profiles | ff profiles name [OLD] NEW | ff --profile P <command>
@@ -455,7 +505,8 @@ shadow roots too; add --css to scope. A click whose target is covered fails with
 clicking; --at X,Y clicks whatever is at that point. "tabHidden" in a result means
 the tab was in the background, where some pages ignore clicks.
 Tabs:    [name] marks a tab another session owns, [opened] one an agent opened,
-         {name} its container. ff open --container C --as S, then ff -s S <cmd>.
+         {name} its container, ‹name› its tab group. ff open --container C --as S,
+         then ff -s S <cmd>. Group colors: grey blue red yellow green pink purple cyan orange.
 Global:  --tab N   --here   -s NAME   --profile P   --json   --timeout MS   --no-autostart
          --wait-for <css> [--wait-timeout MS]   poll until an element appears
 js prints string results raw; add --json for the full value as JSON. Results past

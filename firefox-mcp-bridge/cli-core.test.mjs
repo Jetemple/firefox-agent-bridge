@@ -359,6 +359,7 @@ test("every WS tool is reachable through some CLI command", () => {
     ["key", "Enter"], ["scroll", "--dy", "1"], ["click", "q"], ["dblclick", "q"], ["rclick", "q"], ["hover", "q"],
     ["drag", "--from", "1,2", "--to", "3,4"], ["select", "#s", "v"], ["check", "#c"],
     ["find", "q"], ["links"], ["tables"], ["open", "https://x.com"], ["containers"],
+    ["groups"], ["group", "g"], ["ungroup"],
   ];
   for (const argv of invocations) {
     const p = parseCli(argv);
@@ -379,4 +380,52 @@ test("usageText is one screen and mentions every command", () => {
                      "open", "sessions", "session", "bind", "profiles", "containers", "--container"]) {
     assert.ok(u.includes(cmd), `usage missing: ${cmd}`);
   }
+});
+
+// --- tab groups ---------------------------------------------------------------
+
+test("ff group <name> groups the agent tab, listed ids, or --tab", () => {
+  assert.deepEqual(parseCli(["group", "TV"]).steps, [{ tool: "group_tabs", args: { group: "TV" } }]);
+  assert.deepEqual(parseCli(["group", "TV", "4", "7", "--color", "cyan", "--collapse"]).steps, [
+    { tool: "group_tabs", args: { group: "TV", tabIds: [4, 7], color: "cyan", collapsed: true } },
+  ]);
+  assert.deepEqual(parseCli(["group", "TV", "--tab", "4", "--expand"]).steps, [
+    { tool: "group_tabs", args: { group: "TV", tabId: 4, collapsed: false } },
+  ]);
+  assert.match(parseCli(["group"]).error, /usage: ff group/);
+  assert.match(parseCli(["group", "TV", "4", "--tab", "5"]).error, /not both/);
+  assert.match(parseCli(["group", "TV", "--collapse", "--expand"]).error, /pick one/);
+  assert.match(parseCli(["group", "TV", "x"]).error, /tab id/);
+});
+
+test("ff ungroup takes ids or the usual tab target", () => {
+  assert.deepEqual(parseCli(["ungroup", "4", "5"]).steps, [{ tool: "ungroup_tabs", args: { tabIds: [4, 5] } }]);
+  assert.deepEqual(parseCli(["ungroup", "--here"]).steps, [{ tool: "ungroup_tabs", args: { tabId: "active" } }]);
+});
+
+test("ff open --group preflights get_tab_groups so an old extension opens nothing", () => {
+  assert.deepEqual(parseCli(["open", "x.com", "--group", "TV", "--color", "red"]).steps, [
+    { tool: "get_tab_groups", args: {} },
+    { tool: "open_tab", args: { url: "x.com", active: false, group: "TV", groupColor: "red" } },
+  ]);
+  assert.deepEqual(parseCli(["open", "x.com", "--container", "Gmail", "--group", "TV"]).steps.map((s) => s.tool), [
+    "get_containers", "get_tab_groups", "open_tab",
+  ]);
+  assert.match(parseCli(["open", "x.com", "--color", "red"]).error, /--color goes with --group/);
+  assert.match(parseCli(["open", "x.com", "--group", " "]).error, /needs a name/);
+});
+
+test("tab group output: ff tabs, groups, group, ungroup, open", () => {
+  assert.equal(formatTab({ id: 3, title: "T", url: "u", group: "TV" }), "3   ‹TV› T — u");
+  assert.equal(formatTab({ id: 3, title: "T", url: "u", group: "" }), "3   ‹untitled› T — u");
+  const one = (command, result) => formatResult(command, [{ result }]);
+  assert.equal(
+    one("groups", { groups: [{ title: "TV", color: "cyan", collapsed: true, windowId: 1, tabIds: [4, 5] }] }),
+    "‹TV›  cyan collapsed  window 1  tabs 4, 5",
+  );
+  assert.equal(one("groups", { groups: [] }), "no tab groups");
+  assert.equal(one("group", { group: "TV", color: "cyan", collapsed: false, created: true, tabIds: [4] }), "created ‹TV› (cyan): tab 4");
+  assert.equal(one("ungroup", { ungrouped: [4], notGrouped: [5] }), "ungrouped tab 4 (5 wasn't in a group)");
+  assert.equal(one("ungroup", { ungrouped: [], notGrouped: [5] }), "not in a group");
+  assert.equal(one("open", { tabId: 9, group: "TV" }), "tab 9 in group ‹TV›");
 });

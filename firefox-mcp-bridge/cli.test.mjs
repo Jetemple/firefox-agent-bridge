@@ -652,6 +652,32 @@ test("ff open --container on an extension without container support fails before
   assert.match(c.err.join(""), /predates container support: reload it/);
 });
 
+test("ff open --group on an extension without tab groups fails before opening anything", async () => {
+  const c = await stubOwnerContext({
+    results: {
+      get_tab_groups: { error: { code: "UNKNOWN_TOOL", message: "Unknown tool: get_tab_groups" } },
+      open_tab: { tabId: 55, windowId: 2, url: "https://x.com" },
+    },
+  });
+  const code = await runCli(["open", "https://x.com", "--group", "TV"], c.overrides);
+  assert.equal(code, 1);
+  assert.deepEqual(c.dispatchBodies.map((b) => b.tool), ["get_tab_groups"]);
+  assert.match(c.err.join(""), /predates tab group support: reload it \(0\.2\.5\+\)/);
+});
+
+test("ff open --group --as names the group in the session line", async () => {
+  const c = await stubOwnerContext({
+    results: {
+      get_tab_groups: { groups: [] },
+      open_tab: { tabId: 55, windowId: 2, url: "https://x.com", group: "TV" },
+      session_bind: { name: "tv", profile: "default", tabId: 55, url: "https://x.com", previous: null },
+    },
+  });
+  const code = await runCli(["open", "x.com", "--group", "TV", "--as", "tv"], c.overrides);
+  assert.equal(code, 0);
+  assert.match(c.out.join(""), /session tv → tab 55 \(profile default\) in group ‹TV›/);
+});
+
 test("ff open --container --as prints the container the session's tab landed in", async () => {
   const c = await stubOwnerContext({
     results: {

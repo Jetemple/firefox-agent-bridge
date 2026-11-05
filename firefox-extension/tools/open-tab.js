@@ -8,6 +8,10 @@
     // Resolve the container before creating anything: an unknown name fails
     // instead of opening the page in the default container.
     const cookieStoreId = args.container != null ? await FF.resolveContainer(args.container) : undefined;
+    // Same for the group: a bad name or color, or a Firefox without tab
+    // groups, fails before a tab exists.
+    const grouping = args.group != null ? { name: args.group, color: args.groupColor } : null;
+    if (grouping) FF.checkGroupArgs(grouping);
     const tab = await browser.tabs.create({
       url,
       active: args.active === true,
@@ -22,10 +26,22 @@
     // Report the tab that will stay valid (a container extension may reopen it
     // under a new id) and the URL it actually landed on.
     const landed = FF.isRestricted(url) ? null : await FF.settleTab?.(tab.id);
-    if (landed && !FF.isRestricted(landed.url)) {
-      return { tabId: landed.id, windowId: landed.windowId, url: landed.url, ...(await containerOf(landed)) };
+    const final = landed && !FF.isRestricted(landed.url) ? landed : null;
+    const result = final
+      ? { tabId: final.id, windowId: final.windowId, url: final.url, ...(await containerOf(final)) }
+      : { tabId: FF.followTab?.(tab.id) ?? tab.id, windowId: tab.windowId, url, ...(await containerOf(tab)) };
+    if (grouping) {
+      try {
+        const grouped = await FF.groupTabs([await browser.tabs.get(result.tabId)], grouping);
+        result.group = grouped.group;
+      } catch (err) {
+        // Don't leave a tab behind that the caller never got an id for.
+        FF.expectedCloses?.add(result.tabId);
+        await browser.tabs.remove(result.tabId).catch(() => {});
+        throw err;
+      }
     }
-    return { tabId: FF.followTab?.(tab.id) ?? tab.id, windowId: tab.windowId, url, ...(await containerOf(tab)) };
+    return result;
   };
 
   // The container the tab really ended up in, read back from the tab itself: a
