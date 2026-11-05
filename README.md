@@ -92,7 +92,7 @@ tab can't change containers, so to keep working in one, name a session:
 
 ### Tab groups
 
-Firefox's native tab groups (Firefox 139+). `ff open <url> --group "TV hunt"`
+Firefox's native tab groups. `ff open <url> --group "TV hunt"`
 opens the page straight into the group with that title (case-insensitive),
 creating it if there's none; add `--color` to set its color (grey, blue, red,
 yellow, green, pink, purple, cyan, orange). `ff group <name> [TAB_ID...]`
