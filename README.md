@@ -1,49 +1,60 @@
-# firefox-mcp
+# Agent Bridge for Firefox
 
-Drive your **real, logged-in Firefox** from any coding agent or MCP client.
+Lets coding agents and MCP clients drive the Firefox you're already signed into, in
+background tabs, without touching the tab you're looking at.
 
-Two front doors, one bridge, one extension:
+Two ways in, sharing one local bridge and one extension:
 
-- **`ff` CLI** — for TUI agents (Claude Code, codex, gemini, anything with a
-  shell). No MCP config at all: the agent just runs `ff nav`, `ff text`,
-  `ff click`.
-- **MCP** — stdio for Claude Desktop, StreamableHTTP for Cowork (and any HTTP
-  MCP client), multiple sessions at once.
+- **`ff` CLI** for any agent with a shell (Claude Code, Codex, Gemini CLI). No MCP config.
+- **MCP server**: stdio for Claude Desktop, Streamable HTTP at `/mcp` for Cowork and any
+  HTTP MCP client.
 
 ```
-Claude Desktop ──stdio/MCP──▶ bridge (owner :3002/:3003) ◀──ws── Firefox extension
+Claude Desktop ──stdio/MCP──▶ bridge (:3002/:3003) ◀──ws── Firefox extension
 Cowork ─────────HTTP /mcp───▶   │
 Claude Code ──── ff … ──────────┤  /health + /dispatch (loopback, token)
 codex / gemini ─ ff … ──────────┘
 ```
 
-The first bridge instance owns both ports; extra instances (a second MCP
-client, the CLI's auto-start) detect it via `/health` and forward through it
-instead of fighting over the ports. If the owner quits, a follower takes over
-in-process and the extension reconnects — nothing restarts.
+> **Trust:** anything that can run `ff` or reach the MCP endpoint can act as you on every
+> site you're signed into, including running JavaScript in your pages. Only connect agents
+> you trust. Everything binds to localhost by default; see [Security](#security).
 
-## Quickstart
+## Requirements
+
+- Firefox 142 or newer
+- Node.js 20 or newer
+- Tested on macOS and Linux. `--cowork` setup is macOS-only; Windows is untested.
+
+## Install
 
 ```bash
-npm run setup        # deps, Claude Desktop config, Cowork plugin, `ff` on PATH
+git clone https://github.com/Jetemple/firefox-agent-bridge.git
+cd firefox-agent-bridge
+npm run setup                # deps, and `ff` on your PATH
 ```
 
-then load the extension: Firefox → `about:debugging#/runtime/this-firefox` →
-*Load Temporary Add-on…* → `firefox-extension/manifest.json`, and try:
+`npm run setup -- --desktop` also registers the MCP server with Claude Desktop;
+`--cowork` does that plus LAN exposure for Cowork (see [MCP clients](#mcp-clients)).
+
+Then load the extension: Firefox → `about:debugging#/runtime/this-firefox` →
+*Load Temporary Add-on…* → `firefox-extension/manifest.json`. A temporary add-on goes away
+when Firefox restarts; see [Permanent install](#permanent-install). Try it:
 
 ```bash
 ff status            # bridge + extension state
 ff tabs              # list your tabs
-ff nav example.com   # open a page
+ff nav example.com   # open a page in a background tab
 ff text              # read it
 ```
 
-The bridge auto-starts on demand (`~/.firefox-mcp/bridge.log`); `ff start` /
-`ff stop` control it manually.
+The bridge starts on demand (log: `~/.firefox-mcp/bridge.log`); `ff start` / `ff stop`
+control it by hand.
 
 ## Using it from a coding agent
 
-Drop this in your `CLAUDE.md` / `AGENTS.md`:
+An agent working in this repo (to set it up for you or change it) should read
+[AGENTS.md](AGENTS.md). For day-to-day use, drop this in your `CLAUDE.md` / `AGENTS.md`:
 
 ```markdown
 ## Firefox
@@ -52,7 +63,7 @@ Read: `ff tabs`, `ff text`, `ff links`, `ff find <text>`, `ff screenshot -o x.pn
 Act:  `ff nav <url>`, `ff click <visible text>`, `ff type <field label> <text>`,
       `ff key Enter`, `ff scroll --dy 600`, `ff js <code>`
 Targeting is by visible text (add `--css <sel>` to scope, `--at X,Y` for raw
-coordinates). `navigate`/`click` are fire-and-forget — verify with `ff text`.
+coordinates). `navigate`/`click` are fire-and-forget, so verify with `ff text`.
 Commands run in your own background tab (🤖), never the one I'm viewing; use
 `--here` only when I ask about the page I'm on.
 ```
@@ -113,7 +124,7 @@ ff -s research tab close                     # closes the tab and the session
 ```
 
 Sessions fail safe: if Firefox restarted or the tab is gone you get
-SESSION_STALE — never a command silently running against the wrong tab.
+SESSION_STALE, never a command silently running against the wrong tab.
 
 Run several Firefox profiles at once and name each one (once, per profile):
 
@@ -123,7 +134,7 @@ ff --profile work nav https://mail.example
 ff tabs                      # more than one profile? tabs come grouped
 ```
 
-With one profile connected, nothing changes — name flags are only needed when
+With one profile connected, nothing changes: name flags are only needed when
 two Firefoxes are up.
 
 ## CLI reference
@@ -148,92 +159,53 @@ Exit codes: 0 ok · 1 tool/bridge error · 2 usage.
 
 ## MCP clients
 
-- **Claude Desktop** — `npm run setup` registers the stdio server; restart
+- **Claude Desktop:** `npm run setup -- --desktop` registers the stdio server; restart
   Desktop afterward.
-- **Cowork** — `FIREFOX_BRIDGE_EXPOSE=1 npm run setup`, then upload the
-  generated `firefox-bridge.plugin` (Settings → Upload local plugin). See
-  [Security](#security).
-- **Any HTTP MCP client** — point it at `http://127.0.0.1:3003/mcp`. Multiple
-  concurrent sessions are supported.
+- **Cowork:** `npm run setup -- --cowork`, then upload the generated
+  `firefox-bridge.plugin` (Settings → Upload local plugin). This exposes the bridge on your
+  LAN behind a token; see [Security](#security).
+- **Any HTTP MCP client:** point it at `http://127.0.0.1:3003/mcp`. Multiple concurrent
+  sessions are supported.
 
-## Why
-
-Most agent-browser tools spin up a *fresh, throwaway* browser that's logged into
-nothing — great for clean-room automation and testing. firefox-mcp does the opposite,
-and that's the point: it acts **as you, in the browser you're already signed into**.
-
-> "Open my Gmail and summarize the top thread" just works — because it's *your* Firefox,
-> already logged in.
-
-It's not a replacement for clean-room tools like Playwright; it's the answer to a
-different question. And it's a Firefox answer in a space that's almost entirely
-Chrome-centric.
+The first bridge instance owns both ports. Extra instances (a second MCP client, the CLI's
+auto-start) find it through `/health` and forward through it. If the owner quits, a
+follower takes over in-process and the extension reconnects.
 
 ## Security
 
-The SSE/HTTP endpoint can drive your logged-in browser — including running arbitrary
-JavaScript on your pages (`javascript_tool`) — so it is **locked to localhost by
-default** (`127.0.0.1:3003`). In the default configuration nothing on your network can
-reach it.
+- **Localhost by default.** The HTTP endpoint binds `127.0.0.1:3003`; nothing on your
+  network can reach it.
+- **LAN exposure always has a token.** `--cowork` generates a 256-bit token
+  (`.firefox-bridge-token`, gitignored), binds `0.0.0.0`, requires the token on every
+  request (`Authorization: Bearer <token>` or `?token=`), and bakes the header into the
+  Cowork plugin. The setup script can't expose the endpoint without one. If you bind a
+  non-loopback host by hand (`FIREFOX_BRIDGE_SSE_HOST`) without `FIREFOX_BRIDGE_SSE_TOKEN`,
+  the bridge starts anyway and logs a warning. Don't.
+- **WebSocket relay** (`127.0.0.1:3002`, bridge ↔ extension) rejects connections whose
+  `Origin` is a web page, so a site you visit can't hijack it.
+- **`/dispatch`** (the CLI's endpoint) accepts only loopback connections, requires the local
+  token (an owner-only file web pages can't read), rejects web-page origins, requires exact
+  `application/json`, and validates every tool name and argument against the MCP schemas.
+- **`/health`** exposes only name, version, pid, start time, and connection state.
 
-To use a client that connects over the network (such as Cowork, which reaches the host
-over its LAN IP), opt in to LAN exposure — which **always** comes with a token:
-
-```bash
-FIREFOX_BRIDGE_EXPOSE=1 npm run setup
-```
-
-That one command generates a 256-bit token (stored in `.firefox-bridge-token`, which is
-gitignored), binds the SSE endpoint on `0.0.0.0`, requires the token on every request,
-and rebuilds `firefox-bridge.plugin` with a matching `Authorization` header. There is no
-way to expose the endpoint **without** a token through the script.
-
-Under the hood the bridge reads two env vars (set for you by the script, e.g. in the
-Claude Desktop server entry's `env`):
-
-```bash
-FIREFOX_BRIDGE_SSE_HOST=0.0.0.0
-FIREFOX_BRIDGE_SSE_TOKEN=<the-generated-secret>
-```
-
-A client then presents the token on every request — either an `Authorization: Bearer
-<token>` header (what the generated Cowork plugin uses) or a `?token=<token>` query
-parameter. If you manually bind a non-loopback host **without** a token, the bridge
-still starts but logs a loud warning — don't do that.
-
-**WebSocket relay:** the `127.0.0.1:3002` relay (bridge ↔ extension) rejects WebSocket
-connections whose `Origin` is a web page (`http(s)://…`), so a malicious site you visit
-can't open `ws://127.0.0.1:3002` and hijack the relay. The extension (a
-`moz-extension://` origin) is unaffected.
-
-**`/dispatch` (the CLI's endpoint)** is defense-in-depth hardened: it always
-requires the local token (auto-provisioned 0600 file — web pages can't read
-it), rejects any web-page `Origin`, requires exact `application/json` (so a
-cross-origin page can't even send a no-preflight "simple" request that
-matters), only accepts loopback connections regardless of the bind host, and
-validates every tool name and argument against the same schemas as MCP before
-anything reaches Firefox. `/health` exposes only name/version/pid/startedAt/connected.
-
-### Configuration
+## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `FIREFOX_BRIDGE_WS_PORT` | `3002` | WebSocket port (Desktop + extension relay) |
 | `FIREFOX_BRIDGE_WS_HOST` | `127.0.0.1` | WebSocket bind address |
-| `FIREFOX_BRIDGE_SSE_PORT` | `3003` | StreamableHTTP/SSE port |
-| `FIREFOX_BRIDGE_SSE_HOST` | `127.0.0.1` | SSE bind address — set `0.0.0.0` to expose (use a token!) |
-| `FIREFOX_BRIDGE_SSE_TOKEN` | _(none)_ | Require this bearer/query token on SSE requests |
+| `FIREFOX_BRIDGE_SSE_PORT` | `3003` | Streamable HTTP port |
+| `FIREFOX_BRIDGE_SSE_HOST` | `127.0.0.1` | HTTP bind address: set `0.0.0.0` to expose (use a token!) |
+| `FIREFOX_BRIDGE_SSE_TOKEN` | _(none)_ | Require this bearer/query token on HTTP requests |
 | `FIREFOX_BRIDGE_TOKEN_FILE` | `.firefox-bridge-token` | Path to local token file (0600, prevents web access) |
 | `FIREFOX_BRIDGE_LOG_DIR` | `~/.firefox-mcp` | Directory for bridge logs (`bridge.log`) |
-| `FIREFOX_BRIDGE_EXPOSE` | `0` | `1` → `npm run setup` provisions secure LAN exposure (token + header) |
+| `FIREFOX_BRIDGE_EXPOSE` | `0` | `1` is the same as `npm run setup -- --cowork` |
 | `FIREFOX_BRIDGE_WS_ALLOW_ANY_ORIGIN` | `0` | `1` → disable the WS origin guard (debug escape hatch) |
 | `FIREFOX_BRIDGE_AGENT_TAB_IDLE_MS` | `7200000` | Close agent tabs idle this long (ms); `0` disables the sweep |
 
-## Status & caveats
+## Caveats
 
-- A **temporary** add-on drops when Firefox restarts. For a permanent install, sign
-  your own copy (see *Permanent install* below).
-- `navigate` and `click` are **fire-and-forget** — they return when the action is
+- `navigate` and `click` are **fire-and-forget**: they return when the action is
   initiated, without waiting for the page to finish loading or settling. Add your own
   read-back (e.g. `get_page_text`) when you need to be sure a step landed.
 - Mouse and keyboard tools dispatch synthetic DOM events: they drive page handlers, not
@@ -252,9 +224,8 @@ add-ons automatically, usually within minutes:
 
 1. Get API credentials at <https://addons.mozilla.org/developers/addon/api/key/> and
    export them as `WEB_EXT_API_KEY` (the JWT issuer) and `WEB_EXT_API_SECRET`.
-2. If you forked this repo, change `browser_specific_settings.gecko.id` in
-   `firefox-extension/manifest.json`: an add-on id belongs to the account that first
-   signed it.
+2. Change `browser_specific_settings.gecko.id` in `firefox-extension/manifest.json` to
+   your own: an add-on id belongs to the account that first signed it.
 3. `npm run sign`, then open the `.xpi` from `web-ext-artifacts/` in Firefox (or drag it
    onto a window) and approve the install. Remove the temporary copy from
    `about:debugging` first.
@@ -264,14 +235,18 @@ Each upload needs a new `version` in the manifest, so bump it before signing aga
 ## Development
 
 ```bash
-cd firefox-mcp-bridge && npm install
-npm test          # from the repo root: runs the bridge + scripts unit tests
+npm install --prefix firefox-mcp-bridge
+npm test                 # bridge, extension, and bench unit tests
+npm run lint:extension   # web-ext lint
 ```
 
-Add a tool: define it in `firefox-mcp-bridge/tools.mjs`, add a handler file under
-`firefox-extension/tools/`, register the handler in the extension manifest, and add
-tests. A parity test enforces that the bridge and extension expose the same tool names.
+Add a tool: define it in `firefox-mcp-bridge/tools.mjs`, add a handler under
+`firefox-extension/tools/`, register it in the extension manifest, and add tests. A parity
+test checks that the bridge and the extension expose the same tool names.
+
+The extension's `manifest.json` version is the one that matters for releases; the
+`package.json` versions are internal.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

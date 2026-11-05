@@ -1,10 +1,13 @@
 {
-  "name": "firefox-mcp",
+  "name": "firefox-agent-bridge",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A local MCP server + Firefox extension that lets an MCP client drive Firefox: navigate, click, type, screenshot, read page text, run JS, and list tabs — over public MCP and WebExtension APIs.",
+  "description": "Lets coding agents and MCP clients drive your signed-in Firefox, via the ff CLI or an MCP server, in background tabs.",
   "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "setup": "bash scripts/setup-firefox-bridge.sh",
     "test": "node --test firefox-mcp-bridge/*.test.mjs scripts/*.test.mjs bench/*.test.mjs",
