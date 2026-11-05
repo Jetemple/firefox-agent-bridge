@@ -17,7 +17,9 @@ cd firefox-agent-bridge
 npm run setup        # deps + `ff` on PATH; add `-- --desktop` or `-- --cowork` for those apps
 ```
 
-Load the extension: `about:debugging#/runtime/this-firefox` → *Load Temporary Add-on…* →
+Install the signed extension from the [latest release](https://github.com/Jetemple/firefox-agent-bridge/releases/latest)
+(open the `.xpi` in Firefox). Working on the extension itself? Load it temporarily instead:
+`about:debugging#/runtime/this-firefox` → *Load Temporary Add-on…* →
 `firefox-extension/manifest.json`. Then:
 
 ```bash
@@ -66,7 +68,7 @@ To have an agent set this up or change the code, point it at [AGENTS.md](AGENTS.
 
 ## Permanent install
 
-A temporary add-on is gone when Firefox restarts. To keep it, get AMO API keys, export
+To sign your own build, get AMO API keys, export
 `WEB_EXT_API_KEY` / `WEB_EXT_API_SECRET`, set your own `gecko.id` in the manifest, and run
 `npm run sign`. Open the `.xpi` from `web-ext-artifacts/`.
 
