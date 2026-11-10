@@ -3,7 +3,7 @@
 // (click/type by query) become find_element + coordinate steps — the bridge
 // stays strictly schema-shaped; agent-friendliness lives client-side.
 
-const GLOBAL_BOOL = new Set(["json", "no-autostart", "replace", "here"]);
+const GLOBAL_BOOL = new Set(["json", "no-autostart", "replace", "here", "settle"]);
 const GLOBAL_VALUE = new Set(["session", "profile", "timeout", "wait-for", "wait-timeout"]);
 const BOOL_FLAGS = new Set([
   ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "mine", "dry-run", "ctrl", "alt", "shift", "meta", "foreground", "collapse", "expand",
@@ -346,6 +346,7 @@ export function parseCli(argv) {
         replace: !!flags.replace,
         timeout: flags.timeout != null ? Number(flags.timeout) : undefined,
         waitFor: flags["wait-for"],
+        settle: !!flags.settle,
         waitTimeout: flags["wait-timeout"] != null ? Number(flags["wait-timeout"]) : undefined,
         session: flags.session,
         profile: flags.profile,
@@ -368,6 +369,10 @@ export function parseCli(argv) {
     }
     if (global.waitTimeout != null && !Number.isFinite(global.waitTimeout)) {
       return { ok: false, error: "--wait-timeout must be a number of milliseconds" };
+    }
+    // A click can start its navigation late, so "loaded" would describe the old page.
+    if (global.settle && command !== "nav" && command !== "open") {
+      return { ok: false, error: "--settle works with nav and open only" };
     }
     if (LIFECYCLE.has(command)) return { ok: true, kind: "lifecycle", command, flags: global };
     const builder = BUILDERS[command];
@@ -509,6 +514,7 @@ Tabs:    [name] marks a tab another session owns, [opened] one an agent opened,
          then ff -s S <cmd>. Group colors: grey blue red yellow green pink purple cyan orange.
 Global:  --tab N   --here   -s NAME   --profile P   --json   --timeout MS   --no-autostart
          --wait-for <css> [--wait-timeout MS]   poll until an element appears
+         --settle   (nav, open) wait for the page to finish loading, then pause 0.8-2.5 s (random)
 js prints string results raw; add --json for the full value as JSON. Results past
 50000 chars (ff js --max N to change) are truncated; --json shows truncated/length.
 The bridge auto-starts on demand; logs: ~/.firefox-mcp/bridge.log`;

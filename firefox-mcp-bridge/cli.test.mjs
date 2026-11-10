@@ -372,6 +372,114 @@ test("ff nav --wait-for polls find_element until the selector appears", async ()
   }
 });
 
+test("ff nav --settle polls document.readyState until the page is complete", async () => {
+  const owner = await stubOwner({
+    results: {
+      navigate: { result: { tabId: 21, url: "https://x" } },
+      // loading on the first two polls, complete on the third
+      javascript_tool: (nth) => ({ result: { result: nth < 2 ? "loading" : "complete" } }),
+    },
+  });
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["nav", "https://x", "--settle"], { ...c.opts, waitPollMs: 1, settleMs: () => 0 });
+    assert.equal(code, 0);
+    const polls = owner.requests.filter((r) => r.body.tool === "javascript_tool");
+    assert.equal(polls.length, 3);
+    assert.equal(polls[0].body.args.tabId, 21);
+    assert.equal(polls[0].body.args.code, "document.readyState");
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff nav --settle fails on an error that is not a loading page", async () => {
+  const owner = await stubOwner({
+    results: {
+      navigate: { result: { tabId: 21, url: "https://x" } },
+      javascript_tool: { error: { code: "TAB_NOT_FOUND", message: "Tab 21 not found" } },
+    },
+  });
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["nav", "https://x", "--settle"], { ...c.opts, waitPollMs: 1, settleMs: () => 0 });
+    assert.equal(code, 1);
+    assert.equal(owner.requests.filter((r) => r.body.tool === "javascript_tool").length, 1);
+    assert.match(c.err.join(""), /TAB_NOT_FOUND/);
+  } finally {
+    await owner.close();
+  }
+});
+
+test("--wait-for and --settle probes never get more time than --wait-timeout", async () => {
+  const owner = await stubOwner({
+    results: {
+      navigate: { result: { tabId: 21, url: "https://x" } },
+      find_element: { result: { found: true } },
+      javascript_tool: { result: { result: "complete" } },
+    },
+  });
+  const c = ctx(owner);
+  try {
+    const argv = ["nav", "https://x", "--wait-for", ".card", "--settle", "--wait-timeout", "5000"];
+    const code = await runCli(argv, { ...c.opts, waitPollMs: 1, settleMs: () => 0 });
+    assert.equal(code, 0);
+    const probes = owner.requests.filter((r) => r.body.tool !== "navigate");
+    assert.deepEqual(probes.map((r) => r.body.tool), ["find_element", "javascript_tool"]);
+    for (const p of probes) assert.ok(p.body.timeoutMs >= 1 && p.body.timeoutMs <= 5000, `timeoutMs=${p.body.timeoutMs}`);
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff nav --settle warns and exits 0 when the page never finishes loading", async () => {
+  const owner = await stubOwner({
+    results: {
+      navigate: { result: { tabId: 21, url: "https://x" } },
+      javascript_tool: { result: { result: "loading" } },
+    },
+  });
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["nav", "https://x", "--settle", "--wait-timeout", "20"], { ...c.opts, waitPollMs: 1, settleMs: () => 0 });
+    assert.equal(code, 0);
+    assert.match(c.err.join(""), /--settle: page still loading/);
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff nav --settle says so when the load state can never be read", async () => {
+  const owner = await stubOwner({
+    results: {
+      navigate: { result: { tabId: 21, url: "https://x" } },
+      javascript_tool: { error: { code: "SCRIPT_FAILED", message: "executeScript failed: Missing host permission" } },
+    },
+  });
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["nav", "https://x", "--settle", "--wait-timeout", "20"], { ...c.opts, waitPollMs: 1, settleMs: () => 0 });
+    assert.equal(code, 0);
+    assert.match(c.err.join(""), /could not read the page's load state.*SCRIPT_FAILED/);
+    assert.doesNotMatch(c.err.join(""), /still loading/);
+  } finally {
+    await owner.close();
+  }
+});
+
+test("ff click --settle is a usage error and dispatches nothing", async () => {
+  const owner = await stubOwner({});
+  const c = ctx(owner);
+  try {
+    const code = await runCli(["click", "Buy", "--settle"], c.opts);
+    assert.equal(code, 2);
+    assert.equal(owner.requests.length, 0);
+    assert.match(c.err.join(""), /nav and open only/);
+  } finally {
+    await owner.close();
+  }
+});
+
 test("ff nav --wait-for keeps polling through transient errors while the new tab is still about:blank", async () => {
   const owner = await stubOwner({
     results: {
