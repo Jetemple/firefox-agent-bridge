@@ -25,6 +25,8 @@ changing the code.
   `http://127.0.0.1:3003/mcp`.
 - `ff` works in its own background tab (🤖) and never switches the user's tab. Use `--here`
   only when the user asks about the page they're on.
+- Every agent shares that one tab. When more than one agent may be running, each opens its
+  own with `ff open <url> --as <unique-name>` and passes `-s <unique-name>` on every command.
 - `nav` and `open` return before the page loads; add `--settle` to wait for it. `click`
   doesn't wait either, so read back with `ff text` before claiming a step worked.
   `ff type` exits nonzero when the text didn't land.

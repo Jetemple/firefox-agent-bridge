@@ -505,6 +505,8 @@ Act:     ff click <query> [--css SEL] | --at X,Y     (also: hover, dblclick, rcl
 Commands run in the agent tab (🤖), a background tab \`ff nav\` opens and reuses —
 your view never switches. --here targets the tab you're viewing instead;
 \`ff tab activate\` brings the agent tab into view.
+Every agent shares that one tab. If other agents may be running, take your own:
+\`ff open <url> --as NAME\` (a name unique to you), then \`ff -s NAME\` on every command.
 <query> matches visible text/aria-label/placeholder (find_element), in iframes and
 shadow roots too; add --css to scope. A click whose target is covered fails without
 clicking; --at X,Y clicks whatever is at that point. "tabHidden" in a result means
