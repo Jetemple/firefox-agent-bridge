@@ -115,33 +115,73 @@ async function resolveJsSource(argv, deps) {
   return code == null ? argv : [...globals, "js", code, ...rest];
 }
 
-// Client-side `--wait-for <css>`: poll find_element until the selector appears
-// (or the deadline passes), so callers stop guessing fixed `sleep`s after nav.
-async function waitForSelector(settings, token, deps, flags, lastResult, envelope) {
-  const timeoutMs = Number.isFinite(flags.waitTimeout) ? flags.waitTimeout : 10000;
-  const args = { selector: flags.waitFor };
-  // A session already pins the tab bridge-side — only fall back to the last
-  // step's tab when there is no session in the envelope.
-  if (!envelope.session && lastResult?.tabId != null) args.tabId = lastResult.tabId;
-  const deadline = Date.now() + timeoutMs;
+// Which tab a wait should probe. A session already pins the tab bridge-side, so
+// only fall back to the last step's tab when there is no session in the envelope.
+function waitTarget(envelope, lastResult) {
+  return !envelope.session && lastResult?.tabId != null ? { tabId: lastResult.tabId } : {};
+}
+
+// Shared loop behind --wait-for and --settle: call probe(budgetMs) until it
+// returns true or the deadline passes. Each probe gets only the time that is
+// left (capped at --timeout, or the bridge's 15 s default), so one slow probe
+// cannot run past the deadline. Errors that `retryable` rejects are thrown.
+async function pollUntil(deadline, deps, flags, probe, retryable) {
   let lastError = null;
   for (;;) {
+    const budgetMs = Math.max(1, Math.min(flags.timeout || 15000, deadline - Date.now()));
     try {
-      const r = await dispatch(settings, token, deps.fetchFn, "find_element", args, flags.timeout, envelope);
-      if (r?.found) return;
+      if (await probe(budgetMs)) return { done: true, lastError: null };
       lastError = null;
     } catch (err) {
-      // A tab created mid-navigation is briefly about:blank (RESTRICTED_URL) and
-      // a loading page can transiently fail the probe — that's exactly what we
-      // are waiting out, so swallow it and retry until the deadline.
+      if (!retryable(err)) throw err;
       lastError = err;
     }
-    if (Date.now() >= deadline) {
-      const detail = lastError ? ` (last error: ${lastError.message})` : "";
-      throw new CliError(`--wait-for: "${flags.waitFor}" did not appear within ${Math.round(timeoutMs / 1000)}s${detail}`);
-    }
+    if (Date.now() >= deadline) return { done: false, lastError };
     await new Promise((res) => setTimeout(res, deps.waitPollMs));
   }
+}
+
+// Client-side `--wait-for <css>`: poll find_element until the selector appears
+// (or the deadline passes), so callers stop guessing fixed `sleep`s after nav.
+async function waitForSelector(settings, token, deps, flags, lastResult, envelope, wait) {
+  const args = { selector: flags.waitFor, ...waitTarget(envelope, lastResult) };
+  const probe = async (budgetMs) =>
+    (await dispatch(settings, token, deps.fetchFn, "find_element", args, budgetMs, envelope))?.found;
+  // A tab created mid-navigation is briefly about:blank (RESTRICTED_URL) and a
+  // loading page can transiently fail the probe: that's exactly what we are
+  // waiting out, so every error is retried until the deadline.
+  const { done, lastError } = await pollUntil(wait.deadline, deps, flags, probe, () => true);
+  if (!done) {
+    const detail = lastError ? ` (last error: ${lastError.message})` : "";
+    throw new CliError(`--wait-for: "${flags.waitFor}" did not appear within ${Math.round(wait.ms / 1000)}s${detail}`);
+  }
+}
+
+// Client-side `--settle`: poll document.readyState until the page has loaded,
+// then pause a random moment (0.8–2.5 s by default) so the next read or click
+// doesn't land the instant the page appears. A page that never finishes loading
+// is not an error: after the deadline we warn and carry on, as a fixed sleep would.
+// Only "page not ready yet" is retried: about:blank before the load starts
+// (RESTRICTED_URL), a script that can't run mid-navigation (SCRIPT_FAILED), or a
+// probe that ran out of time (WS_TIMEOUT). A closed tab or a dead bridge is a
+// real failure and is thrown.
+const NOT_READY = /^(RESTRICTED_URL|SCRIPT_FAILED|WS_TIMEOUT):/;
+async function waitForLoad(settings, token, deps, flags, lastResult, envelope, wait) {
+  const args = { code: "document.readyState", ...waitTarget(envelope, lastResult) };
+  const probe = async (budgetMs) =>
+    (await dispatch(settings, token, deps.fetchFn, "javascript_tool", args, budgetMs, envelope))?.result === "complete";
+  const { done, lastError } = await pollUntil(wait.deadline, deps, flags, probe, (err) => NOT_READY.test(err?.message ?? ""));
+  if (!done) {
+    // Two different outcomes: the page answered "still loading", or the load
+    // state could never be read at all (e.g. a page that forbids scripts).
+    const secs = Math.round(wait.ms / 1000);
+    deps.stderr(
+      lastError
+        ? `--settle: could not read the page's load state within ${secs}s, continuing (last error: ${lastError.message})\n`
+        : `--settle: page still loading after ${secs}s, continuing\n`,
+    );
+  }
+  await new Promise((res) => setTimeout(res, deps.settleMs()));
 }
 
 async function dispatch(settings, token, fetchFn, tool, args, timeout, envelope = {}) {
@@ -296,6 +336,7 @@ export async function runCli(argv, overrides = {}) {
     readFileFn: overrides.readFileFn ?? readFileSync,
     readStdin: overrides.readStdin ?? readStdinAll,
     waitPollMs: overrides.waitPollMs ?? 250,
+    settleMs: overrides.settleMs ?? (() => 800 + Math.random() * 1700),
     env,
   };
   const settings = readSettings(env);
@@ -409,8 +450,14 @@ export async function runCli(argv, overrides = {}) {
       throw err;
     }
 
+    // --wait-for and --settle share one --wait-timeout budget (default 10 s).
+    const waitMs = Number.isFinite(parsed.flags.waitTimeout) ? parsed.flags.waitTimeout : 10000;
+    const wait = { ms: waitMs, deadline: Date.now() + waitMs };
     if (parsed.flags.waitFor) {
-      await waitForSelector(settings, token, deps, parsed.flags, prev, envelope);
+      await waitForSelector(settings, token, deps, parsed.flags, prev, envelope, wait);
+    }
+    if (parsed.flags.settle) {
+      await waitForLoad(settings, token, deps, parsed.flags, prev, envelope, wait);
     }
 
     if (parsed.command === "open" && parsed.flags.as) {
