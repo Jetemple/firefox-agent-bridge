@@ -36,8 +36,11 @@ Add to your `CLAUDE.md` / `AGENTS.md`:
 
 ```markdown
 You can drive my logged-in Firefox with `ff` (run `ff --help` once). It works in its
-own background tab; use `--here` only when I ask about the page I'm on. `nav` and
-`click` don't wait, so verify with `ff text`.
+own background tab; use `--here` only when I ask about the page I'm on. `nav` returns
+before the page loads: add `--settle` to wait for it. `click` doesn't wait either, so
+verify with `ff text`. Every agent shares that tab, so if other agents may be running,
+open your own with `ff open <url> --as <unique-name>` and pass `-s <unique-name>` on
+every command.
 ```
 
 To have an agent set this up or change the code, point it at [AGENTS.md](AGENTS.md).

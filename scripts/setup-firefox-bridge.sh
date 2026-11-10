@@ -14,7 +14,8 @@
 # 0.0.0.0 and ALWAYS requires a generated token (stored in .firefox-bridge-token,
 # gitignored); this script has no way to expose the endpoint without one.
 #
-# macOS only for now (LAN IP detection uses ipconfig/route).
+# The default setup runs on macOS and Linux. --cowork is macOS only for now
+# (LAN IP detection uses ipconfig/route).
 
 set -euo pipefail
 
@@ -137,7 +138,9 @@ fi
 cat <<EOF
 
 ${c_blue}────────────────────────────────────────────────────────────${c_reset}
- Load the extension: Firefox → about:debugging#/runtime/this-firefox
+ Install the extension: open the signed .xpi in Firefox from
+   https://github.com/Jetemple/firefox-agent-bridge/releases/latest
+ Or run it from this checkout: about:debugging#/runtime/this-firefox
    → "Load Temporary Add-on…" → $EXT_MANIFEST
 
  Try it:  ff status   ·   ff tabs   ·   ff nav example.com   ·   ff --help
