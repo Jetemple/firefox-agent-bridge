@@ -8,23 +8,26 @@ changing the code.
 1. `npm run setup` installs dependencies and puts `ff` on PATH. Add `-- --desktop` only if
    the user wants Claude Desktop, `-- --cowork` only if they want Cowork (it exposes the
    bridge on the LAN, so ask first).
-2. **The user has to load the extension themselves**; you can't. Ask them to open
-   `about:debugging#/runtime/this-firefox` in Firefox → *Load Temporary Add-on…* →
-   `firefox-extension/manifest.json`. A temporary add-on is gone after a Firefox restart;
-   README → *Permanent install* covers signing.
+2. **The user has to install the extension themselves**; you can't. Ask them to open the
+   signed `.xpi` from the
+   [latest release](https://github.com/Jetemple/firefox-agent-bridge/releases/latest) in
+   Firefox. To run the extension from this checkout instead, they open
+   `about:debugging#/runtime/this-firefox` → *Load Temporary Add-on…* →
+   `firefox-extension/manifest.json`; that one is gone after a Firefox restart.
 3. Run `ff status` until it prints `extension: connected`. The bridge starts on demand;
    its log is `~/.firefox-mcp/bridge.log`.
 
 ## Connect and use it
 
-- **Shell agents:** run `ff --help` once, then use `ff`. Paste README → *Using it from a
-  coding agent* into the user's `CLAUDE.md` / `AGENTS.md` so later sessions know about it.
+- **Shell agents:** run `ff --help` once, then use `ff`. Paste README → *Tell your
+  agent* into the user's `CLAUDE.md` / `AGENTS.md` so later sessions know about it.
 - **MCP clients:** stdio via Claude Desktop (`--desktop`), or Streamable HTTP at
   `http://127.0.0.1:3003/mcp`.
 - `ff` works in its own background tab (🤖) and never switches the user's tab. Use `--here`
   only when the user asks about the page they're on.
-- `nav` and `click` don't wait for the page; read back with `ff text` before claiming a step
-  worked. `ff type` exits nonzero when the text didn't land.
+- `nav` and `open` return before the page loads; add `--settle` to wait for it. `click`
+  doesn't wait either, so read back with `ff text` before claiming a step worked.
+  `ff type` exits nonzero when the text didn't land.
 - This is the user's signed-in browser. Don't send messages, buy things, or submit forms
   for them without asking.
 
