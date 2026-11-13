@@ -56,6 +56,19 @@ test("ff tab close/activate, reload --hard, back, forward", () => {
   assert.deepEqual(steps(["forward"]).steps, [{ tool: "forward", args: {} }]);
 });
 
+test("ff tab activate --no-focus fronts the tab without focusing its window; default unchanged", () => {
+  assert.deepEqual(steps(["tab", "activate", "--no-focus"]).steps, [{ tool: "activate_tab", args: { focusWindow: false } }]);
+  assert.deepEqual(steps(["tab", "activate", "--tab", "3", "--no-focus"]).steps, [
+    { tool: "activate_tab", args: { tabId: 3, focusWindow: false } },
+  ]);
+  // --no-focus is boolean: it must not swallow the next token.
+  assert.deepEqual(steps(["tab", "activate", "--no-focus", "--tab", "4"]).steps, [
+    { tool: "activate_tab", args: { tabId: 4, focusWindow: false } },
+  ]);
+  assert.deepEqual(steps(["-s", "x", "tab", "activate", "--no-focus"]).steps, [{ tool: "activate_tab", args: { focusWindow: false } }]);
+  assert.match(parseCli(["tab", "close", "--no-focus"]).error, /--no-focus goes with ff tab activate/);
+});
+
 // --- composites ---
 
 test("ff click <query> plans find_element then click at the found center", () => {
@@ -287,6 +300,14 @@ test("open builds open_tab; --foreground activates; --as passes the label to the
   assert.deepEqual(bg.steps, [{ tool: "open_tab", args: { url: "https://x.com", active: false } }]);
 });
 
+test("open --agent-window asks for the agent window; --foreground conflicts with it", () => {
+  assert.deepEqual(parseCli(["open", "x.com", "--agent-window", "--as", "s"]).steps, [
+    { tool: "open_tab", args: { url: "x.com", active: false, label: "s", agentWindow: true } },
+  ]);
+  assert.match(parseCli(["open", "x.com", "--agent-window", "--foreground"]).error, /drop --foreground/);
+  assert.equal(formatResult("open", [{ result: { tabId: 5, windowId: 9, agentWindow: true } }]), "tab 5 in agent window 9");
+});
+
 test("open --container passes the container through; a bare --container is a usage error", () => {
   const p = parseCli(["open", "mail.google.com", "--container", "Gmail", "--as", "mail"]);
   // get_containers runs first so an extension without container support fails
@@ -428,4 +449,18 @@ test("tab group output: ff tabs, groups, group, ungroup, open", () => {
   assert.equal(one("ungroup", { ungrouped: [4], notGrouped: [5] }), "ungrouped tab 4 (5 wasn't in a group)");
   assert.equal(one("ungroup", { ungrouped: [], notGrouped: [5] }), "not in a group");
   assert.equal(one("open", { tabId: 9, group: "TV" }), "tab 9 in group ‹TV›");
+});
+
+test("a bad session name fails up front with the rule and an example (issue #6)", () => {
+  for (const argv of [
+    ["open", "https://x.com", "--as", "hn_ui"],
+    ["bind", "Hn-UI", "--tab", "3"],
+    ["-s", "hn_ui", "text"],
+    ["open", "https://x.com", "--as", "a".repeat(33)],
+  ]) {
+    const r = parseCli(argv);
+    assert.equal(r.ok, false, argv.join(" "));
+    assert.match(r.error, /lowercase letters, digits and hyphens.*max 32.*e\.g\. hn-ui/, argv.join(" "));
+  }
+  assert.equal(parseCli(["open", "https://x.com", "--as", "hn-ui"]).ok, true);
 });

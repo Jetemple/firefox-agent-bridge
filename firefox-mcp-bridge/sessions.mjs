@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 
 export const SESSION_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+export const SESSION_NAME_HINT = "session name must be lowercase letters, digits and hyphens, starting with a letter or digit (max 32), e.g. hn-ui";
 
 // A record read from disk is only trusted if it has the exact shape bind()
 // writes — sessions gate destructive tab actions, so a hand-edited or
@@ -61,7 +62,7 @@ export function createSessionStore({ filePath, log = () => {} } = {}) {
   function bind(name, { profile, tabId, runId, url }) {
     const key = String(name ?? "");
     if (!SESSION_NAME_RE.test(key)) {
-      throw { code: "BAD_NAME", message: `session name must match ${SESSION_NAME_RE}` };
+      throw { code: "BAD_NAME", message: SESSION_NAME_HINT };
     }
     const previous = records.get(key) ?? null;
     records.set(key, { profile, tabId, runId, url: url ?? null, createdAt: Date.now() });

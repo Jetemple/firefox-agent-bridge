@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SESSION_NAME_RE } from "./sessions.mjs";
+import { SESSION_NAME_RE, SESSION_NAME_HINT } from "./sessions.mjs";
 
 // Tool definitions for the Firefox MCP bridge.
 //
@@ -101,7 +101,7 @@ export const TOOLS = [
         .optional(),
       label: z
         .string()
-        .regex(SESSION_NAME_RE)
+        .regex(SESSION_NAME_RE, SESSION_NAME_HINT)
         .describe("Short name shown in the tab strip as \"🤖 label · title\".")
         .optional(),
       container: z
@@ -111,6 +111,10 @@ export const TOOLS = [
         .optional(),
       group: groupName.describe("Optional: tab group to put the new tab in, joined by title (case-insensitive) or created.").optional(),
       groupColor: groupColor.describe("Optional: color for the group (applies to an existing group too).").optional(),
+      agentWindow: z
+        .boolean()
+        .describe("Open the tab in the dedicated agent window (created unfocused if missing or closed), not the user's window. Its tabs open in the background; front one with activate_tab focusWindow: false. Ignores active.")
+        .optional(),
     },
   },
   {
@@ -194,8 +198,14 @@ export const TOOLS = [
   },
   {
     name: "activate_tab",
-    description: "Bring a tab to the foreground (activate it and focus its window). The only tool that changes what the user sees; omit tabId to show the agent tab.",
-    inputSchema: { tabId },
+    description: "Bring a tab to the foreground (activate it and focus its window). The only tool that changes what the user sees; omit tabId to show the agent tab. focusWindow: false makes it the front tab of its window without raising the window or taking focus (for pages that only render in the front tab, e.g. in the agent window).",
+    inputSchema: {
+      tabId,
+      focusWindow: z
+        .boolean()
+        .describe("Raise and focus the tab's window. Default: true. false fronts the tab inside its window only.")
+        .optional(),
+    },
   },
   {
     name: "reload",

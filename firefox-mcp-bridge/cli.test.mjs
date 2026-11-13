@@ -733,6 +733,24 @@ test("ff -s research text sends the session in the dispatch body", async () => {
   assert.equal(c.dispatchBodies[0].tool, "get_page_text");
 });
 
+test("ff text warns when a background tab rendered almost nothing", async () => {
+  const c = await stubOwnerContext({ results: { get_page_text: { text: "", length: 0, background: true } } });
+  const code = await runCli(["-s", "research", "text"], c.overrides);
+  assert.equal(code, 0);
+  assert.match(c.err.join(""), /background tab.*--agent-window/s);
+});
+
+test("ff text stays quiet for a background tab that rendered fine, or a front tab that is short", async () => {
+  for (const result of [
+    { text: "x".repeat(500), length: 500, background: true },
+    { text: "short", length: 5 },
+  ]) {
+    const c = await stubOwnerContext({ results: { get_page_text: result } });
+    assert.equal(await runCli(["-s", "research", "text"], c.overrides), 0);
+    assert.equal(c.err.join(""), "");
+  }
+});
+
 test("ff open --as binds a session after opening and prints the binding", async () => {
   const c = await stubOwnerContext({
     results: {
@@ -745,6 +763,37 @@ test("ff open --as binds a session after opening and prints the binding", async 
   assert.deepEqual(c.dispatchBodies.map((b) => b.tool), ["open_tab", "session_bind"]);
   assert.deepEqual(c.dispatchBodies[1].args, { name: "research", tabId: 55 });
   assert.match(c.out.join(""), /session research → tab 55 \(profile work\)/);
+});
+
+test("ff open --agent-window --as names the agent window in the session line", async () => {
+  const c = await stubOwnerContext({
+    results: {
+      open_tab: { tabId: 55, windowId: 9, url: "https://x.com", agentWindow: true },
+      session_bind: { name: "scrape", profile: "default", tabId: 55, url: "https://x.com", previous: null },
+    },
+  });
+  const code = await runCli(["open", "x.com", "--as", "scrape", "--agent-window"], c.overrides);
+  assert.equal(code, 0);
+  assert.deepEqual(c.dispatchBodies[0].args, { url: "x.com", active: false, label: "scrape", agentWindow: true });
+  assert.match(c.out.join(""), /session scrape → tab 55 \(profile default\) in agent window 9/);
+  assert.equal(c.err.join(""), "");
+});
+
+test("ff open --agent-window puts the extension's warning on stderr", async () => {
+  const c = await stubOwnerContext({
+    results: { open_tab: { tabId: 55, windowId: 9, url: "https://x.com", agentWindow: true, warning: "The agent window is minimized" } },
+  });
+  const code = await runCli(["open", "x.com", "--agent-window"], c.overrides);
+  assert.equal(code, 0);
+  assert.match(c.out.join(""), /tab 55 in agent window 9/);
+  assert.match(c.err.join(""), /warning: The agent window is minimized/);
+});
+
+test("ff open --agent-window warns when the extension is too old to honor it", async () => {
+  const c = await stubOwnerContext({ results: { open_tab: { tabId: 55, windowId: 2, url: "https://x.com" } } });
+  const code = await runCli(["open", "x.com", "--agent-window"], c.overrides);
+  assert.equal(code, 0);
+  assert.match(c.err.join(""), /predates --agent-window/);
 });
 
 test("ff open --container on an extension without container support fails before opening anything", async () => {
