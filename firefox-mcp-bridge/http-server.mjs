@@ -7,7 +7,7 @@ import { TOOLS, WS_TOOL_NAMES } from "./tools.mjs";
 import { isSseAuthorized } from "./sse-auth.mjs";
 import { isAllowedWsOrigin } from "./ws-relay.mjs";
 import { createBridge, SERVER_VERSION } from "./bridge.mjs";
-import { createSessionStore } from "./sessions.mjs";
+import { createSessionStore, SESSION_NAME_HINT } from "./sessions.mjs";
 
 export const HEALTH_NAME = "firefox-mcp-bridge";
 export const MAX_DISPATCH_TIMEOUT_MS = 120000;
@@ -52,7 +52,7 @@ DISPATCH_SCHEMAS.set("close_agent_tabs", z.object({ dryRun: z.boolean().optional
 
 // Bridge pseudo-tools: answered locally, never forwarded to the extension.
 export const BRIDGE_TOOL_SCHEMAS = new Map([
-  ["session_bind", z.object({ name: z.string().regex(NAME_RE), tabId: z.number() })],
+  ["session_bind", z.object({ name: z.string().regex(NAME_RE, SESSION_NAME_HINT), tabId: z.number() })],
   ["session_list", z.object({})],
   ["session_remove", z.object({ name: z.string() })],
   ["profiles_list", z.object({})],

@@ -95,6 +95,20 @@ test("group A tab tools take an optional tabId; reload adds optional bypassCache
   assert.equal(byName.reload.inputSchema.bypassCache.parse(undefined), undefined);
 });
 
+test("activate_tab takes an optional boolean focusWindow", () => {
+  const schema = byName.activate_tab.inputSchema;
+  assert.equal(schema.focusWindow.parse(undefined), undefined);
+  assert.equal(schema.focusWindow.parse(false), false);
+  assert.throws(() => schema.focusWindow.parse("no"));
+});
+
+test("open_tab takes an optional boolean agentWindow", () => {
+  const schema = byName.open_tab.inputSchema;
+  assert.equal(schema.agentWindow.parse(undefined), undefined);
+  assert.equal(schema.agentWindow.parse(true), true);
+  assert.throws(() => schema.agentWindow.parse("yes"));
+});
+
 test("group B interaction tools expose their coordinate / key / selector inputs", () => {
   for (const n of ["hover", "double_click", "right_click"]) {
     assert.equal(byName[n].inputSchema.x.parse(3), 3);

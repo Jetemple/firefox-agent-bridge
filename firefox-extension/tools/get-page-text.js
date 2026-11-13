@@ -39,13 +39,16 @@
 
   FF.tools.get_page_text = async (args, tab) => {
     const max = args.maxLength ?? null;
-    const top = await FF.inject(tab.id, extractPageText, [max]);
+    // Some sites render nothing in a tab that isn't the front tab of its
+    // window; say so, so a near-empty read can be explained.
+    const bg = tab.active === false ? { background: true } : {};
+    const top = { ...(await FF.inject(tab.id, extractPageText, [max])), ...bg };
     const frames = await FF.injectChildFrames(tab.id, extractPageText, [max, true]);
     const texts = frames.map((f) => f.result).filter((r) => r.text.trim());
     if (!texts.length) return top;
     const header = (r) => `\n\n[frame: ${r.url}]\n`;
     const text = texts.reduce((all, r) => all + header(r) + r.text, top.text);
     const length = texts.reduce((n, r) => n + header(r).length + r.length, top.length);
-    return { text: max != null ? text.slice(0, max) : text, truncated: max != null && length > max, length };
+    return { text: max != null ? text.slice(0, max) : text, truncated: max != null && length > max, length, ...bg };
   };
 }

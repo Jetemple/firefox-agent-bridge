@@ -1,3 +1,4 @@
+import { SESSION_NAME_RE, SESSION_NAME_HINT } from "./sessions.mjs";
 // Pure CLI planning/formatting for `ff`. No I/O here: parseCli turns argv into
 // dispatch steps; cli.mjs executes them over HTTP. Composite commands
 // (click/type by query) become find_element + coordinate steps — the bridge
@@ -6,7 +7,7 @@
 const GLOBAL_BOOL = new Set(["json", "no-autostart", "replace", "here", "settle"]);
 const GLOBAL_VALUE = new Set(["session", "profile", "timeout", "wait-for", "wait-timeout"]);
 const BOOL_FLAGS = new Set([
-  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "mine", "dry-run", "ctrl", "alt", "shift", "meta", "foreground", "collapse", "expand",
+  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "mine", "dry-run", "ctrl", "alt", "shift", "meta", "foreground", "collapse", "expand", "no-focus", "agent-window",
 ]);
 
 function tokenize(argv) {
@@ -113,13 +114,18 @@ const BUILDERS = {
     return [{ tool: "javascript_tool", args }];
   },
   tab: (pos, flags) => {
+    if (flags["no-focus"] && pos[0] !== "activate") throw new UsageError("--no-focus goes with ff tab activate");
     if (pos[0] === "close" && flags.mine) {
       if (flags.tab != null || flags.here) throw new UsageError("--mine closes every agent-opened tab; drop --tab/--here");
       return [{ tool: "close_agent_tabs", args: flags["dry-run"] ? { dryRun: true } : {} }];
     }
     if (pos[0] === "close") return [{ tool: "close_tab", args: withTab({}, flags) }];
-    if (pos[0] === "activate") return [{ tool: "activate_tab", args: withTab({}, flags) }];
-    throw new UsageError("usage: ff tab close|activate [--tab N], or ff tab close --mine [--dry-run]");
+    if (pos[0] === "activate") {
+      const args = withTab({}, flags);
+      if (flags["no-focus"]) args.focusWindow = false;
+      return [{ tool: "activate_tab", args }];
+    }
+    throw new UsageError("usage: ff tab close|activate [--tab N] [--no-focus], or ff tab close --mine [--dry-run]");
   },
   reload: (pos, flags) => {
     const args = withTab({}, flags);
@@ -173,8 +179,12 @@ const BUILDERS = {
     return [{ tool: "get_tables", args }];
   },
   open: (pos, flags) => {
-    if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--container C] [--group G [--color C]] [--profile P] [--foreground]");
+    if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--container C] [--group G [--color C]] [--profile P] [--foreground | --agent-window]");
+    if (flags.foreground && flags["agent-window"]) {
+      throw new UsageError("--agent-window keeps your focus; drop --foreground (front its tab with ff tab activate --no-focus)");
+    }
     const args = { url: pos[0], active: !!flags.foreground };
+    if (flags["agent-window"]) args.agentWindow = true;
     // --as names a session; hand it to the extension as the tab-title marker
     // label so the strip shows "🤖 <name> · …". Omitted → emoji-only stamp.
     if (flags.as != null) args.label = flags.as;
@@ -351,7 +361,15 @@ export function parseCli(argv) {
         session: flags.session,
         profile: flags.profile,
         as: flags.as,
+        agentWindow: !!flags["agent-window"],
       };
+    }
+
+    // Catch a bad session name here, with the rule, instead of a bare
+    // "Invalid" from the schema check after dispatch.
+    const name = flags.as ?? flags.session ?? (command === "bind" ? positionals[0] : undefined);
+    if (name != null && !SESSION_NAME_RE.test(String(name))) {
+      return { ok: false, error: `${SESSION_NAME_HINT}, got: ${name}` };
     }
 
     if (flags.session != null && flags.tab != null) {
@@ -439,7 +457,7 @@ export function formatResult(command, results, { json = false } = {}) {
       return `profile named "${last?.name}"`; // set_profile_name result
     }
     case "open":
-      return `tab ${last?.tabId}${last?.container ? ` in container ${last.container}` : ""}${last?.group != null ? ` in group ‹${last.group}›` : ""}`;
+      return `tab ${last?.tabId}${last?.agentWindow ? ` in agent window ${last.windowId}` : ""}${last?.container ? ` in container ${last.container}` : ""}${last?.group != null ? ` in group ‹${last.group}›` : ""}`;
     case "groups": {
       const groups = last?.groups ?? [];
       if (!groups.length) return "no tab groups";
@@ -481,10 +499,10 @@ export function usageText() {
   return `ff — drive your real, logged-in Firefox from the shell
 
 Bridge:  ff status | start [--replace] | stop | ping
-Tabs:    ff tabs                        ff tab close|activate [--tab N]
+Tabs:    ff tabs                        ff tab close|activate [--tab N] [--no-focus]
          ff tab close --mine [--dry-run]  close every tab the agent opened
          ff nav <url> [--tab N]         ff reload [--hard] | back | forward
-         ff open <url> [--as NAME] [--container C] [--foreground]
+         ff open <url> [--as NAME] [--container C] [--foreground | --agent-window]
          ff containers                  list containers (by name or id for --container)
          ff open <url> --group G [--color C]  open straight into a tab group
          ff groups                      ff group <name> [TAB_ID...] [--color C] [--collapse|--expand]
@@ -507,6 +525,9 @@ your view never switches. --here targets the tab you're viewing instead;
 \`ff tab activate\` brings the agent tab into view.
 Every agent shares that one tab. If other agents may be running, take your own:
 \`ff open <url> --as NAME\` (a name unique to you), then \`ff -s NAME\` on every command.
+Pages that render only as the front tab (X, YouTube, most feeds): \`ff open <url> --as NAME
+--agent-window\` puts the tab in a separate agent window that stays behind your apps; every
+command fronts the tab there first. Don't minimize that window: reads fail (WINDOW_MINIMIZED).
 <query> matches visible text/aria-label/placeholder (find_element), in iframes and
 shadow roots too; add --css to scope. A click whose target is covered fails without
 clicking; --at X,Y clicks whatever is at that point. "tabHidden" in a result means
