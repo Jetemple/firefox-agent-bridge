@@ -43,6 +43,26 @@ open your own with `ff open <url> --as <unique-name>` and pass `-s <unique-name>
 every command.
 ```
 
+### Sites that only render the front tab
+
+Some sites (X, YouTube, most feeds) render nothing in a background tab. Give them a tab in
+the agent window, a separate Firefox window the bridge opens without focusing it. Each new
+tab there opens as the window's front tab, and every command fronts its tab first, so
+several agents can share the window. Fronting a tab never focuses the window.
+
+```bash
+ff open x.com --as scrape --agent-window   # creates the window if it's missing or closed
+ff -s scrape text
+ff -s scrape tab close                     # the window's last tab leaves a blank tab, so it stays
+```
+
+A near-empty `ff text` from a background tab elsewhere prints a hint to use the agent window.
+
+Leave the agent window behind other windows rather than minimizing it: a minimized window
+doesn't render, so reads fail with `WINDOW_MINIMIZED`. On macOS, creating the window brings
+Firefox forward once; the bridge never focuses your windows, and it tags the agent window so
+it finds it again after an extension reload instead of making a new one.
+
 To have an agent set this up or change the code, point it at [AGENTS.md](AGENTS.md).
 
 ## MCP clients

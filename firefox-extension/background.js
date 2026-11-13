@@ -208,6 +208,14 @@ function pickReplacement(oldId, windowId, candidates) {
   return fits.length === 1 ? fits[0][0] : null;
 }
 
+// open_tab made this tab, so it is a fresh agent tab, not a stand-in for one
+// that closed: drop any replacement link onCreated guessed for it, or a stale
+// id could act on another agent's tab (issue #5).
+FF.claimOpenedTab = function claimOpenedTab(tabId) {
+  recentlyCreated.delete(tabId);
+  for (const [oldId, newId] of FF.tabAliases) if (newId === tabId) FF.tabAliases.delete(oldId);
+};
+
 FF.onTabCreated = function onTabCreated(tab) {
   if (!tab || tab.id == null) return;
   prune(recentlyCreated);
@@ -358,6 +366,9 @@ const NO_TAB = new Set([
 // restricted URLs (captureVisibleTab does not inject script).
 const SKIP_RESTRICTED = new Set(["screenshot"]);
 
+// Time for a just-fronted tab to repaint before it is read.
+const FRONT_SETTLE_MS = 300;
+
 async function runTool(tool, args) {
   const handler = FF.tools[tool];
   if (typeof handler !== "function") throw bridgeError("UNKNOWN_TOOL", `Unknown tool: ${tool}`);
@@ -377,6 +388,18 @@ async function runTool(tool, args) {
       throw bridgeError("RESTRICTED_URL", `Tab ${tab.id} hasn't started loading its page yet (still about:blank) — retry in a moment`);
     }
     if (FF.isRestricted(tab.url)) throw bridgeError("RESTRICTED_URL", `Tab URL is restricted: ${tab.url}`);
+  }
+  // A minimized agent window doesn't render its pages: fail loudly instead of
+  // handing back empty text.
+  if (FF.agentWindowId != null && tab.windowId === FF.agentWindowId) {
+    const win = await browser.windows.get(tab.windowId).catch(() => null);
+    if (win?.state === "minimized") throw bridgeError("WINDOW_MINIMIZED", FF.MINIMIZED_WARNING);
+    // Agents share the agent window, and only its front tab renders: front
+    // this tab before acting on it. Activating a tab doesn't focus the window.
+    if (tab.active === false) {
+      await browser.tabs.update(tab.id, { active: true });
+      await FF.sleep(FRONT_SETTLE_MS);
+    }
   }
   return handler(args, tab);
 }
