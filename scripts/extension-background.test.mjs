@@ -85,7 +85,7 @@ function loadBackground({ tabs = {}, storageData = {}, WebSocketCtor } = {}) {
   return { FF: sandbox.FFBridge, stored };
 }
 
-function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor, contextualIdentities, tabGroups } = {}) {
+function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor, contextualIdentities, tabGroups, windows, sessions } = {}) {
   const listeners = () => ({ addListener: () => {} });
   const stored = { ...storageData };
   const sandbox = {
@@ -118,6 +118,8 @@ function loadWithTools({ tabs = {}, storageData = {}, WebSocketCtor, contextualI
       tabs,
       ...(contextualIdentities ? { contextualIdentities } : {}),
       ...(tabGroups ? { tabGroups } : {}),
+      ...(windows ? { windows } : {}),
+      ...(sessions ? { sessions } : {}),
     },
   };
   createContext(sandbox);
@@ -273,6 +275,221 @@ test("open_tab activates only when asked", async () => {
   });
   await FF.tools.open_tab({ url: "https://x.com", active: true });
   assert.equal(created[0].active, true);
+});
+
+// --- agent window ----------------------------------------------------------
+
+// Cross-realm objects from the vm fail deepStrictEqual; compare via JSON.
+const j = (v) => JSON.parse(JSON.stringify(v));
+
+// A fake windows API: `existing` maps window id -> window; create() makes a new
+// one (focused as `focusOnCreate` says) holding a single tab.
+function fakeWindows({ existing = {}, focusOnCreate = false, lastFocused = { id: 1 } } = {}) {
+  const calls = [];
+  const wins = new Map(Object.entries(existing).map(([id, w]) => [Number(id), { id: Number(id), state: "normal", ...w }]));
+  let removed = null;
+  const api = {
+    calls,
+    wins,
+    fireRemoved: (id) => removed?.(id),
+    get: async (id) => {
+      calls.push(["get", id]);
+      if (!wins.has(id)) throw new Error(`Invalid window ID: ${id}`);
+      return wins.get(id);
+    },
+    getLastFocused: async () => lastFocused,
+    create: async (opts) => {
+      calls.push(["create", opts]);
+      const id = 100 + calls.filter((c) => c[0] === "create").length;
+      const win = { id, state: "normal", focused: focusOnCreate, tabs: [{ id: id * 10, windowId: id }] };
+      wins.set(id, win);
+      return win;
+    },
+    update: async (id, info) => calls.push(["update", id, info]),
+    onRemoved: { addListener: (fn) => (removed = fn) },
+  };
+  return api;
+}
+
+test("open_tab agentWindow creates an unfocused window the first time, then opens background tabs in it", async () => {
+  const created = [];
+  const windows = fakeWindows();
+  const { FF } = loadWithTools({
+    windows,
+    tabs: { create: async (opts) => (created.push(opts), { id: 7, windowId: opts.windowId }) },
+  });
+  const first = await FF.tools.open_tab({ url: "x.com", agentWindow: true });
+  assert.deepEqual(j(windows.calls.find((c) => c[0] === "create")), ["create", { url: "https://x.com", focused: false }]);
+  assert.equal(created.length, 0, "the new window's own tab is used, not an extra one");
+  assert.equal(first.tabId, 1010);
+  assert.equal(first.windowId, 101);
+  assert.equal(first.agentWindow, true);
+  assert.equal(first.warning, undefined);
+  assert.equal(FF.agentWindowId, 101);
+
+  const second = await FF.tools.open_tab({ url: "youtube.com", agentWindow: true, active: true });
+  // Front tab of the agent window from the start, so pages that render only
+  // when visible load right away; the window itself is never focused.
+  assert.deepEqual(j(created), [{ url: "https://youtube.com", active: true, windowId: 101 }]);
+  assert.equal(second.tabId, 7);
+  assert.equal(windows.calls.filter((c) => c[0] === "create").length, 1);
+  assert.ok(!windows.calls.some((c) => c[0] === "update"), "never touches window focus");
+});
+
+test("open_tab agentWindow recreates the window after the user closes it", async () => {
+  const windows = fakeWindows();
+  const { FF } = loadWithTools({ windows, tabs: { create: async (opts) => ({ id: 7, windowId: opts.windowId }) } });
+  await FF.tools.open_tab({ url: "x.com", agentWindow: true });
+  // Closed and reported: the listener forgets it.
+  windows.wins.delete(101);
+  windows.fireRemoved(101);
+  assert.equal(FF.agentWindowId, null);
+  const res = await FF.tools.open_tab({ url: "x.com", agentWindow: true });
+  assert.equal(res.windowId, 102);
+  // Closed without the event (e.g. missed while asleep): windows.get fails, recreate.
+  windows.wins.delete(102);
+  const again = await FF.tools.open_tab({ url: "x.com", agentWindow: true });
+  assert.equal(again.windowId, 103);
+  assert.equal(FF.agentWindowId, 103);
+});
+
+test("open_tab agentWindow finds its window again after an extension reload, instead of making a new one", async () => {
+  // Firefox keeps session values on a window across extension reloads; the
+  // extension's in-memory id does not survive. A new window steals focus on macOS.
+  const values = new Map();
+  const sessions = {
+    setWindowValue: async (id, key, v) => values.set(`${id}:${key}`, v),
+    getWindowValue: async (id, key) => values.get(`${id}:${key}`),
+  };
+  const windows = fakeWindows();
+  windows.getAll = async () => [...windows.wins.values()];
+  const tabs = { create: async (opts) => ({ id: 7, windowId: opts.windowId }) };
+  const first = loadWithTools({ windows, sessions, tabs }).FF;
+  await first.tools.open_tab({ url: "x.com", agentWindow: true });
+  assert.equal(first.agentWindowId, 101);
+
+  const reloaded = loadWithTools({ windows, sessions, tabs }).FF;
+  assert.equal(reloaded.agentWindowId, null);
+  const res = await reloaded.tools.open_tab({ url: "youtube.com", agentWindow: true });
+  assert.equal(res.windowId, 101);
+  assert.equal(windows.calls.filter((c) => c[0] === "create").length, 1, "no second window");
+});
+
+test("open_tab agentWindow warns when the agent window is minimized", async () => {
+  const windows = fakeWindows({ existing: { 50: { state: "minimized" } } });
+  const { FF } = loadWithTools({ windows, tabs: { create: async (opts) => ({ id: 7, windowId: opts.windowId }) } });
+  FF.agentWindowId = 50;
+  const res = await FF.tools.open_tab({ url: "x.com", agentWindow: true });
+  assert.equal(res.windowId, 50);
+  assert.match(res.warning, /agent window is minimized/);
+  assert.ok(!windows.calls.some((c) => c[0] === "update"), "doesn't restore (and so raise) the window itself");
+});
+
+test("open_tab agentWindow never focuses the user's window, even if Firefox focused the new one", async () => {
+  // Refocusing "the window the user was in" raises the user's main Firefox
+  // window over whatever app they were actually using: worse than the steal.
+  const windows = fakeWindows({ focusOnCreate: true, lastFocused: { id: 3 } });
+  const { FF } = loadWithTools({ windows, tabs: {} });
+  const res = await FF.tools.open_tab({ url: "x.com", agentWindow: true });
+  assert.deepEqual(j(windows.calls.filter((c) => c[0] === "update")), []);
+  assert.match(res.warning, /focused the new agent window/);
+});
+
+test("open_tab agentWindow: two opens at once share one new window", async () => {
+  const windows = fakeWindows();
+  const { FF } = loadWithTools({ windows, tabs: { create: async (opts) => ({ id: 7, windowId: opts.windowId }) } });
+  const [a, b] = await Promise.all([
+    FF.tools.open_tab({ url: "x.com", agentWindow: true }),
+    FF.tools.open_tab({ url: "youtube.com", agentWindow: true }),
+  ]);
+  assert.equal(windows.calls.filter((c) => c[0] === "create").length, 1);
+  assert.equal(a.windowId, 101);
+  assert.equal(b.windowId, 101);
+});
+
+test("a tool on a tab in a minimized agent window fails with WINDOW_MINIMIZED instead of reading nothing", async () => {
+  FakeWebSocket.instances = [];
+  const windows = fakeWindows({ existing: { 50: { state: "minimized" } } });
+  const { FF } = loadWithTools({
+    WebSocketCtor: FakeWebSocket,
+    windows,
+    tabs: { get: async (id) => ({ id, windowId: 50, url: "https://x.com", status: "complete" }) },
+  });
+  FF.agentWindowId = 50;
+  FF.tools.get_page_text = async () => ({ text: "" });
+  const sock = FakeWebSocket.instances[0];
+  sock.fire("message", { data: JSON.stringify({ id: "1", tool: "get_page_text", args: { tabId: 5 } }) });
+  await new Promise((r) => setImmediate(r));
+  const reply = sock.sent.find((m) => m.id === "1");
+  assert.equal(reply.error.code, "WINDOW_MINIMIZED");
+  assert.match(reply.error.message, /Restore it/);
+
+  // Restored: the same call goes through.
+  windows.wins.get(50).state = "normal";
+  sock.fire("message", { data: JSON.stringify({ id: "2", tool: "get_page_text", args: { tabId: 5 } }) });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(sock.sent.find((m) => m.id === "2").result, { text: "" });
+});
+
+test("a tool on a background tab of the agent window fronts it first, without focusing the window", async () => {
+  FakeWebSocket.instances = [];
+  const windows = fakeWindows({ existing: { 50: { state: "normal" } } });
+  const updates = [];
+  const { FF } = loadWithTools({
+    WebSocketCtor: FakeWebSocket,
+    windows,
+    tabs: {
+      get: async (id) => ({ id, windowId: 50, active: id === 6, url: "https://x.com", status: "complete" }),
+      update: async (id, info) => (updates.push([id, info]), { id }),
+    },
+  });
+  FF.agentWindowId = 50;
+  FF.sleep = async () => {};
+  FF.tools.get_page_text = async () => ({ text: "ok" });
+  const sock = FakeWebSocket.instances[0];
+  sock.fire("message", { data: JSON.stringify({ id: "1", tool: "get_page_text", args: { tabId: 5 } }) });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(sock.sent.find((m) => m.id === "1").result, { text: "ok" });
+  assert.deepEqual(j(updates), [[5, { active: true }]]);
+  assert.ok(!windows.calls.some((c) => c[0] === "update"), "never focuses the window");
+
+  // Already in front: nothing to do.
+  sock.fire("message", { data: JSON.stringify({ id: "2", tool: "get_page_text", args: { tabId: 6 } }) });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(updates.length, 1);
+});
+
+test("a background tab outside the agent window is never fronted", async () => {
+  FakeWebSocket.instances = [];
+  const updates = [];
+  const { FF } = loadWithTools({
+    WebSocketCtor: FakeWebSocket,
+    windows: fakeWindows(),
+    tabs: {
+      get: async (id) => ({ id, windowId: 3, active: false, url: "https://x.com", status: "complete" }),
+      update: async (id, info) => updates.push([id, info]),
+    },
+  });
+  FF.agentWindowId = 50;
+  FF.tools.get_page_text = async () => ({ text: "ok" });
+  const sock = FakeWebSocket.instances[0];
+  sock.fire("message", { data: JSON.stringify({ id: "1", tool: "get_page_text", args: { tabId: 5 } }) });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(sock.sent.find((m) => m.id === "1").result, { text: "ok" });
+  assert.equal(updates.length, 0);
+});
+
+test("a tab open_tab created is never another tab's replacement (issue #5)", async () => {
+  // Agent A's tab 1 closes unexpectedly; agent B's open_tab creates tab 2 in the
+  // same window before B has marked it, so it looks like 1's replacement.
+  const { FF } = loadWithTools({ tabs: { create: async () => ({ id: 2, windowId: 3 }) } });
+  FF.markedTabs.set(1, "agent-a");
+  FF.onTabRemoved(1, { windowId: 3 });
+  FF.onTabCreated({ id: 2, windowId: 3 });
+  assert.equal(FF.followTab(1), 2, "adopted before B could claim it");
+  await FF.tools.open_tab({ url: "x.com", label: "agent-b" });
+  assert.equal(FF.followTab(1), 1, "B's open claims tab 2, so A's stale id no longer points at it");
+  assert.equal(FF.markedTabs.get(2), "agent-b");
 });
 
 // --- containers ------------------------------------------------------------

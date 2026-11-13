@@ -166,6 +166,8 @@ async function waitForSelector(settings, token, deps, flags, lastResult, envelop
 // probe that ran out of time (WS_TIMEOUT). A closed tab or a dead bridge is a
 // real failure and is thrown.
 const NOT_READY = /^(RESTRICTED_URL|SCRIPT_FAILED|WS_TIMEOUT):/;
+// Under this many characters, a background-tab read counts as "rendered nothing".
+const EMPTY_READ_CHARS = 200;
 async function waitForLoad(settings, token, deps, flags, lastResult, envelope, wait) {
   const args = { code: "document.readyState", ...waitTarget(envelope, lastResult) };
   const probe = async (budgetMs) =>
@@ -460,6 +462,25 @@ export async function runCli(argv, overrides = {}) {
       await waitForLoad(settings, token, deps, parsed.flags, prev, envelope, wait);
     }
 
+    // A near-empty read from a background tab usually means the site renders
+    // only the visible tab (X, YouTube, ...). Hint on stderr; stdout stays clean.
+    if (parsed.command === "text") {
+      const read = results[results.length - 1].result;
+      if (read?.background && (read.length ?? read.text?.length ?? 0) < EMPTY_READ_CHARS) {
+        deps.stderr("warning: this background tab rendered almost no text; some sites only render a visible tab. Open it with `ff open <url> --as NAME --agent-window` and read it there.\n");
+      }
+    }
+
+    // Agent-window caveats go to stderr so stdout stays parseable.
+    if (parsed.command === "open" && parsed.flags.agentWindow) {
+      const opened = results[results.length - 1].result;
+      if (!opened?.agentWindow) {
+        deps.stderr("warning: the Firefox extension predates --agent-window, so the tab opened in your window: reload the extension and retry\n");
+      } else if (opened.warning) {
+        deps.stderr(`warning: ${opened.warning}\n`);
+      }
+    }
+
     if (parsed.command === "open" && parsed.flags.as) {
       const opened = results[results.length - 1].result;
       const bound = await dispatch(
@@ -469,7 +490,7 @@ export async function runCli(argv, overrides = {}) {
       deps.stdout(
         parsed.flags.json
           ? `${JSON.stringify(bound, null, 2)}\n`
-          : `session ${bound.name} → tab ${bound.tabId} (profile ${bound.profile})${opened.container ? ` in container ${opened.container}` : ""}${opened.group != null ? ` in group ‹${opened.group}›` : ""}\n`,
+          : `session ${bound.name} → tab ${bound.tabId} (profile ${bound.profile})${opened.agentWindow ? ` in agent window ${opened.windowId}` : ""}${opened.container ? ` in container ${opened.container}` : ""}${opened.group != null ? ` in group ‹${opened.group}›` : ""}\n`,
       );
       return 0;
     }

@@ -65,6 +65,57 @@ test("close_tab defaults to the active tab when no tabId is given", async () => 
   assert.equal(res.tabId, 99);
 });
 
+test("close_tab keeps the agent window alive when closing its last tab", async () => {
+  const calls = [];
+  const FF = loadTabTools({
+    tabs: {
+      query: async (q) => (calls.push(["query", q.windowId]), [{ id: 5, windowId: 10 }]),
+      create: async (opts) => (calls.push(["create", opts.windowId, opts.url, opts.active]), { id: 6 }),
+      remove: async (id) => calls.push(["remove", id]),
+    },
+  });
+  FF.agentWindowId = 10;
+  const res = await FF.tools.close_tab({ tabId: 5 });
+  assert.deepEqual(calls, [["query", 10], ["create", 10, "about:blank", false], ["remove", 5]]);
+  assert.deepEqual(j(res), { closed: true, tabId: 5 });
+});
+
+test("close_tab adds no placeholder when the agent window has other tabs", async () => {
+  const calls = [];
+  const FF = loadTabTools({
+    tabs: {
+      query: async () => [{ id: 5 }, { id: 7 }],
+      create: async () => calls.push(["create"]),
+      remove: async (id) => calls.push(["remove", id]),
+    },
+  });
+  FF.agentWindowId = 10;
+  await FF.tools.close_tab({ tabId: 5 });
+  assert.deepEqual(calls, [["remove", 5]]);
+});
+
+test("close_tab adds no placeholder outside the agent window", async () => {
+  const calls = [];
+  const FF = loadTabTools({
+    tabs: {
+      query: async () => [{ id: 5 }],
+      create: async () => calls.push(["create"]),
+      remove: async (id) => calls.push(["remove", id]),
+    },
+  });
+  FF.agentWindowId = 42;
+  await FF.tools.close_tab({ tabId: 5 });
+  assert.deepEqual(calls, [["remove", 5]]);
+});
+
+test("get_page_text marks a result read from a background tab", async () => {
+  const FF = loadTabTools({});
+  FF.inject = async () => ({ text: "", truncated: false, length: 0 });
+  FF.injectChildFrames = async () => [];
+  assert.equal((await FF.tools.get_page_text({}, { id: 5, active: false })).background, true);
+  assert.equal((await FF.tools.get_page_text({}, { id: 5, active: true })).background, undefined);
+});
+
 test("activate_tab activates the tab and focuses its window", async () => {
   const calls = [];
   const FF = loadTabTools({
@@ -78,6 +129,27 @@ test("activate_tab activates the tab and focuses its window", async () => {
   ]);
   assert.equal(res.activated, true);
   assert.equal(res.tabId, 7);
+});
+
+test("activate_tab with focusWindow false fronts the tab but leaves the window alone", async () => {
+  const calls = [];
+  const FF = loadTabTools({
+    tabs: { update: async (id, info) => calls.push(["tabs.update", id, info]) },
+    windows: { update: async (id, info) => calls.push(["windows.update", id, info]) },
+  });
+  const res = await FF.tools.activate_tab({ tabId: 7, focusWindow: false });
+  assert.deepEqual(j(calls), [["tabs.update", 7, { active: true }]]);
+  assert.equal(res.activated, true);
+  assert.equal(res.windowFocused, false);
+});
+
+test("activate_tab with focusWindow false warns when the window is minimized", async () => {
+  const FF = loadTabTools({
+    tabs: { update: async () => {} },
+    windows: { update: async () => assert.fail("must not focus"), get: async (id) => ({ id, state: "minimized" }) },
+  });
+  const res = await FF.tools.activate_tab({ tabId: 7, focusWindow: false });
+  assert.match(res.warning, /minimized/);
 });
 
 test("reload reloads the tab, passing bypassCache through", async () => {
@@ -255,6 +327,30 @@ test("close_agent_tabs closes the agent's background tabs and leaves the one you
   assert.deepEqual(j(res), { closed: [1, 3], kept: [2] });
   assert.deepEqual(removed, [1, 3], "tab 4 was never the agent's");
   assert.deepEqual([...FF.expectedCloses].sort(), [1, 3], "closes are deliberate, not container reopens");
+});
+
+test("close_agent_tabs closes agent-window tabs even in front, leaving a blank tab so the window survives", async () => {
+  const calls = [];
+  const FF = loadTabTools({
+    tabs: {
+      query: async (q) =>
+        q?.windowId === 10
+          ? [{ id: 5, windowId: 10 }, { id: 6, windowId: 10 }]
+          : [
+              { id: 5, windowId: 10, active: true },
+              { id: 6, windowId: 10, active: false },
+              { id: 7, windowId: 3, active: true },
+            ],
+      create: async (opts) => (calls.push(["create", opts.windowId, opts.url]), { id: 8 }),
+      remove: async (ids) => calls.push(["remove", ids]),
+    },
+  });
+  FF.expectedCloses = new Set();
+  FF.agentWindowId = 10;
+  for (const id of [5, 6, 7]) FF.markedTabs.set(id, null);
+  const res = await FF.tools.close_agent_tabs({});
+  assert.deepEqual(j(res), { closed: [5, 6], kept: [7] });
+  assert.deepEqual(j(calls), [["create", 10, "about:blank"], ["remove", [5, 6]]]);
 });
 
 test("get_tabs_summary flags every agent-opened tab with opened: true", async () => {
