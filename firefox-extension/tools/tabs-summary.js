@@ -7,6 +7,14 @@
     const tabs = await browser.tabs.query({});
     const containers = (await FF.containerNames?.()) ?? new Map();
     const groups = (await FF.groupNames?.()) ?? new Map();
+    // Closed agent tabs each open tab stands in for (a container extension
+    // closes a tab and reopens it under a new id), so the bridge can move a
+    // session from the old id to the new one.
+    const replaces = new Map();
+    for (const oldId of FF.tabAliases?.keys() ?? []) {
+      const now = FF.followTab(oldId);
+      replaces.set(now, [...(replaces.get(now) ?? []), oldId]);
+    }
     return {
       tabs: tabs.map((t) => ({
         id: t.id,
@@ -25,6 +33,7 @@
         // `agent` is the tab un-targeted commands drive, `opened` any tab the
         // agent opened (what close_agent_tabs would close).
         ...(t.id === FF.agentTabId ? { agent: true } : {}),
+        ...(replaces.has(t.id) ? { replaces: replaces.get(t.id) } : {}),
         ...(FF.markedTabs?.has(t.id) || t.id === FF.agentTabId ? { opened: true } : {}),
       })),
     };

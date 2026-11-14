@@ -18,3 +18,14 @@ browser.runtime.onMessage.addListener((message) => {
     render(message.status);
   }
 });
+
+// Whether agents may take the user's focus: raise Firefox, switch the tab they
+// are viewing, open a tab in front. Only this panel writes it, into the
+// extension's own localStorage, which agent code can't reach (focus-gate.js).
+const focusEl = document.querySelector("#allow-focus");
+
+focusEl.checked = localStorage.getItem("allowWindowFocus") === "true";
+
+focusEl.addEventListener("change", () => {
+  localStorage.setItem("allowWindowFocus", String(focusEl.checked));
+});
