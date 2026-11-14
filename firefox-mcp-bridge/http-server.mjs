@@ -48,6 +48,8 @@ const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 DISPATCH_SCHEMAS.set("set_profile_name", z.object({ name: z.string().regex(NAME_RE) }));
 // close_agent_tabs is CLI housekeeping (`ff tab close --mine`), kept out of
 // the MCP tool list for the same reason.
+// With a session it closes only that session's tabs (the bridge adds label
+// and tabId); without one, every agent's tabs (`ff tab close --all-agents`).
 DISPATCH_SCHEMAS.set("close_agent_tabs", z.object({ dryRun: z.boolean().optional() }).strict());
 
 // Bridge pseudo-tools: answered locally, never forwarded to the extension.
@@ -115,7 +117,7 @@ export function validateDispatchBody(body) {
   if (session != null && parsed.data.tabId != null) {
     return { ok: false, code: "DISPATCH_CONFLICT", message: "session and args.tabId are mutually exclusive" };
   }
-  if (session != null && !SESSION_TARGETABLE.has(tool)) {
+  if (session != null && !SESSION_TARGETABLE.has(tool) && tool !== "close_agent_tabs") {
     return { ok: false, code: "DISPATCH_CONFLICT", message: `tool ${tool} does not target a tab, so it cannot take a session` };
   }
   let timeoutMs;
@@ -152,6 +154,18 @@ function readBody(req) {
 
 // One HTTP server for /health, /dispatch, and per-session /mcp. `relay` may be
 // the local WS relay or the SwitchableRelay façade — same interface.
+// True when a dotted version string is at least `min` ([major, minor, patch]).
+// An unknown version (older extensions don't always say) counts as too old.
+export function versionAtLeast(version, min) {
+  if (typeof version !== "string") return false;
+  const parts = version.split(".").map((p) => Number.parseInt(p, 10));
+  for (let i = 0; i < min.length; i++) {
+    const part = Number.isFinite(parts[i]) ? parts[i] : 0;
+    if (part !== min[i]) return part > min[i];
+  }
+  return true;
+}
+
 export function createBridgeHttpServer({
   relay,
   sessions = createSessionStore({ filePath: null }),
@@ -195,6 +209,18 @@ export function createBridgeHttpServer({
     return profiles[0];
   }
 
+  // A container extension can close a session's tab and reopen it under a new
+  // id; the extension reports that as `replaces` on the new tab. Move the
+  // session over, so it isn't taken for a closed tab.
+  function followReplacedTabs(profileName, tabs) {
+    const ids = new Set(tabs.map((t) => t.id));
+    for (const rec of sessions.list()) {
+      if (rec.profile !== profileName || ids.has(rec.tabId)) continue;
+      const now = tabs.find((t) => t.replaces?.includes(rec.tabId));
+      if (now) sessions.retarget(rec.name, now.id);
+    }
+  }
+
   async function handleBridgeTool(v) {
     if (v.tool === "profiles_list") return { profiles: relay.profiles() };
     if (v.tool === "session_remove") return { removed: sessions.remove(v.args.name) };
@@ -202,7 +228,7 @@ export function createBridgeHttpServer({
       const profiles = relay.profiles();
       const tabsByProfile = new Map();
       const out = [];
-      for (const rec of sessions.list()) {
+      for (let rec of sessions.list()) {
         const p = profiles.find((x) => x.name === rec.profile);
         let live = false;
         let currentUrl = null;
@@ -214,7 +240,9 @@ export function createBridgeHttpServer({
             } catch {
               tabsByProfile.set(rec.profile, []);
             }
+            followReplacedTabs(rec.profile, tabsByProfile.get(rec.profile));
           }
+          rec = sessions.get(rec.name) ?? rec;
           const tab = tabsByProfile.get(rec.profile).find((t) => t.id === rec.tabId);
           if (tab) {
             live = true;
@@ -280,8 +308,18 @@ export function createBridgeHttpServer({
             `session "${v.session}" is stale (Firefox restarted or profile "${rec.profile}" disconnected) — rebind with \`ff open <url> --as ${v.session}\` or \`ff bind\``,
           );
         }
+        // An extension before 0.2.8 ignores the session scope and would close
+        // every agent's tabs.
+        if (v.tool === "close_agent_tabs" && !versionAtLeast(live.version, [0, 2, 8])) {
+          return toolError(
+            res,
+            "EXTENSION_OUTDATED",
+            "the Firefox extension is too old to close one session's tabs — update it, or close this tab with `ff -s NAME tab close`",
+          );
+        }
         profile = rec.profile;
-        args = { ...v.args, tabId: rec.tabId };
+        // close_agent_tabs: this session's tabs only (its label, and its tab).
+        args = v.tool === "close_agent_tabs" ? { ...v.args, label: v.session, tabId: rec.tabId } : { ...v.args, tabId: rec.tabId };
       }
       const opts = { ...(v.timeoutMs ? { timeoutMs: v.timeoutMs } : {}), ...(profile ? { profile } : {}) };
       const result = await relay.dispatch(v.tool, args, opts);
@@ -375,7 +413,13 @@ export function createBridgeHttpServer({
           }
         }
       };
-      const server = createBridge({ relay, startedAt });
+      // MCP calls restart a tab's idle clock, as /dispatch does.
+      const onTabUsed = (tabId) => {
+        try {
+          tabLastUsed.set(tabKey(resolveProfileEntry(null).name, tabId), now());
+        } catch {}
+      };
+      const server = createBridge({ relay, startedAt, onTabUsed });
       await server.connect(transport);
       return transport.handleRequest(req, res, body);
     }
@@ -455,6 +499,7 @@ export function createBridgeHttpServer({
       } catch {
         continue; // can't see this profile right now; try next sweep
       }
+      followReplacedTabs(p.name, tabs);
       const ids = new Set(tabs.map((t) => t.id));
       const owned = new Map();
       for (const rec of sessions.list()) {

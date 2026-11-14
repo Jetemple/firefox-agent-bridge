@@ -88,6 +88,13 @@ export function createSessionStore({ filePath, log = () => {} } = {}) {
       rec.lastUsedAt = at;
       persist();
     },
+    // The session's tab was replaced by another (same page, new id).
+    retarget: (name, tabId) => {
+      const rec = records.get(name);
+      if (!rec) return;
+      rec.tabId = tabId;
+      persist();
+    },
     remove: (name) => {
       const had = records.delete(name);
       if (had) persist();

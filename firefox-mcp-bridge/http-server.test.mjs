@@ -8,6 +8,7 @@ import {
   checkDispatchAccess,
   validateDispatchBody,
   createBridgeHttpServer,
+  versionAtLeast,
 } from "./http-server.mjs";
 import { createSessionStore } from "./sessions.mjs";
 
@@ -419,6 +420,30 @@ test("session_bind validates the tab, records runId, and close_tab removes the s
   await close();
 });
 
+test("close_agent_tabs with a session is refused on an extension that would close every agent's tabs", async () => {
+  for (const version of ["0.2.7", undefined]) {
+    const relay = stubRelay({
+      profiles: [{ name: "work", runId: "run-1", version, connectedAt: 1 }],
+      results: { close_agent_tabs: { closed: [42, 7], kept: [] } },
+    });
+    const sessions = createSessionStore({ filePath: null });
+    sessions.bind("probe", { profile: "work", tabId: 42, runId: "run-1", url: "https://a.example" });
+    const { url, close } = await startServer({ relay, sessions });
+    const res = await postDispatch(url, { tool: "close_agent_tabs", session: "probe", args: {} });
+    await close();
+    assert.equal(res.body.error.code, "EXTENSION_OUTDATED");
+    assert.equal(relay.calls.some((c) => c.tool === "close_agent_tabs"), false, "nothing reached Firefox");
+  }
+});
+
+test("versionAtLeast compares dotted versions number by number", () => {
+  assert.equal(versionAtLeast("0.2.8", [0, 2, 8]), true);
+  assert.equal(versionAtLeast("0.2.10", [0, 2, 8]), true);
+  assert.equal(versionAtLeast("0.3.0", [0, 2, 8]), true);
+  assert.equal(versionAtLeast("0.2.7", [0, 2, 8]), false);
+  assert.equal(versionAtLeast(null, [0, 2, 8]), false);
+});
+
 test("close_agent_tabs drops the sessions bound to the tabs it closed", async () => {
   const relay = stubRelay({
     profiles: [{ name: "work", runId: "run-1", connectedAt: 1 }],
@@ -433,6 +458,25 @@ test("close_agent_tabs drops the sessions bound to the tabs it closed", async ()
   const res = await postDispatch(url, { tool: "close_agent_tabs", args: {} });
   assert.deepEqual(res.body.result.closed, [42, 43]);
   assert.deepEqual(sessions.list().map((r) => r.name).sort(), ["kept", "other-profile"]);
+  await close();
+});
+
+test("close_agent_tabs with a session closes only that session's tabs", async () => {
+  const relay = stubRelay({
+    profiles: [{ name: "work", runId: "run-1", version: "0.2.8", connectedAt: 1 }],
+    results: { close_agent_tabs: { closed: [42], kept: [] } },
+  });
+  const sessions = createSessionStore({ filePath: null });
+  sessions.bind("probe", { profile: "work", tabId: 42, runId: "run-1", url: "https://a.example" });
+  sessions.bind("other", { profile: "work", tabId: 7, runId: "run-1", url: "https://b.example" });
+  const { url, close } = await startServer({ relay, sessions });
+
+  const res = await postDispatch(url, { tool: "close_agent_tabs", session: "probe", args: { dryRun: true } });
+  assert.equal(res.body.error, undefined);
+  const call = relay.calls.find((c) => c.tool === "close_agent_tabs");
+  assert.deepEqual(call.args, { dryRun: true, label: "probe", tabId: 42 });
+  assert.equal(call.opts.profile, "work");
+  assert.ok(sessions.get("other"), "another agent's session is untouched");
   await close();
 });
 
@@ -676,6 +720,30 @@ test("idle sweep closes idle agent tabs and leaves the user's, the agent tab, ac
   await r.parts.closeAllSessions();
 });
 
+test("a session whose tab was reopened under a new id follows it: listed live, kept by the sweep", async () => {
+  const tabs = [{ id: 9, active: true, url: "https://now.example", replaces: [6] }];
+  const r = sweepRig({ tabs });
+  r.sessions.bind("job1", { profile: "default", tabId: 6, runId: "run1", url: null });
+  const res = await r.parts.sweepIdleAgentTabs();
+  assert.deepEqual(res.dropped, []);
+  assert.equal(r.sessions.get("job1").tabId, 9);
+  await r.parts.closeAllSessions();
+
+  const relay = stubRelay({
+    profiles: [{ name: "work", runId: "run-1", connectedAt: 1 }],
+    results: { get_tabs_summary: { tabs: [{ id: 43, url: "https://now.example", replaces: [42] }] } },
+  });
+  const sessions = createSessionStore({ filePath: null });
+  sessions.bind("moved", { profile: "work", tabId: 42, runId: "run-1", url: "https://old.example" });
+  const { url, close } = await startServer({ relay, sessions });
+  try {
+    const listed = (await postDispatch(url, { tool: "session_list" })).body.result.sessions[0];
+    assert.deepEqual([listed.live, listed.tabId, listed.url], [true, 43, "https://now.example"]);
+  } finally {
+    await close();
+  }
+});
+
 test("idle sweep measures from the last command, not from when the tab opened", async () => {
   const r = sweepRig({ tabs: [{ id: 7, active: false }] });
   r.sessions.bind("busy", { profile: "default", tabId: 7, runId: "run1", url: null });
@@ -690,6 +758,36 @@ test("idle sweep measures from the last command, not from when the tab opened", 
   await r.parts.sweepIdleAgentTabs();
   assert.deepEqual(r.closedTabs(), [7]);
   await r.parts.closeAllSessions();
+});
+
+test("idle sweep leaves a tab an MCP client is still using", async () => {
+  const r = sweepRig({ tabs: [{ id: 2, active: false, opened: true }] });
+  const { port, close } = await listen(r.parts);
+  try {
+    const init = await mcpInitialize(port);
+    const call = (id, name, args) =>
+      fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-session-id": init.headers.get("mcp-session-id"),
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }),
+      }).then((res) => res.text());
+    await r.parts.sweepIdleAgentTabs(); // first sighting of tab 2 starts its clock
+    r.advance(50_000);
+    await call(2, "get_page_text", { tabId: 2 });
+    r.advance(20_000); // 70s since first seen, 20s since the MCP call
+    await r.parts.sweepIdleAgentTabs();
+    assert.deepEqual(r.closedTabs(), []);
+    r.advance(50_000); // now 70s since the MCP call
+    await r.parts.sweepIdleAgentTabs();
+    assert.deepEqual(r.closedTabs(), [2]);
+  } finally {
+    await r.parts.closeAllSessions();
+    await close();
+  }
 });
 
 test("idle sweep drops session records Firefox can no longer serve", async () => {

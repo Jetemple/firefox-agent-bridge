@@ -115,6 +115,7 @@ export function createRelay({
     connections.set(name, ws);
     info.profile = name;
     info.runId = typeof helloMsg?.runId === "string" ? helloMsg.runId : null;
+    info.version = typeof helloMsg?.version === "string" ? helloMsg.version : null;
     log(`Firefox extension connected as profile "${name}"`);
   }
 
@@ -180,7 +181,7 @@ export function createRelay({
   function profiles() {
     return openProfileNames().map((name) => {
       const info = perSocket.get(connections.get(name));
-      return { name, runId: info?.runId ?? null, connectedAt: info?.connectedAt ?? 0 };
+      return { name, runId: info?.runId ?? null, version: info?.version ?? null, connectedAt: info?.connectedAt ?? 0 };
     });
   }
 

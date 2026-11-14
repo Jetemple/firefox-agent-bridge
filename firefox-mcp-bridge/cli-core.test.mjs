@@ -148,15 +148,35 @@ test("global flags: --json and --timeout are extracted", () => {
 
 // --- formatting ---
 
-test("ff tab close --mine [--dry-run] → close_agent_tabs; refuses a tab target", () => {
-  assert.deepEqual(steps(["tab", "close", "--mine"]).steps, [{ tool: "close_agent_tabs", args: {} }]);
-  assert.deepEqual(steps(["tab", "close", "--mine", "--dry-run"]).steps, [
+test("ff -s NAME tab close --mine [--dry-run] → close_agent_tabs for that session only; refuses a tab target", () => {
+  const p = steps(["-s", "probe", "tab", "close", "--mine"]);
+  assert.deepEqual(p.steps, [{ tool: "close_agent_tabs", args: {} }]);
+  assert.equal(p.flags.session, "probe", "the bridge scopes the close to this session");
+  assert.deepEqual(steps(["-s", "probe", "tab", "close", "--mine", "--dry-run"]).steps, [
     { tool: "close_agent_tabs", args: { dryRun: true } },
   ]);
   for (const extra of [["--tab", "3"], ["--here"]]) {
-    const p = parseCli(["tab", "close", "--mine", ...extra]);
-    assert.equal(p.ok, false);
-    assert.match(p.error, /--mine/);
+    const bad = parseCli(["tab", "close", "--mine", ...extra]);
+    assert.equal(bad.ok, false);
+    assert.match(bad.error, /--mine/);
+  }
+});
+
+test("ff tab close --mine without -s refuses: other agents' tabs are not yours", () => {
+  // An agent cleaning up its test tab once closed another agent's tab this way.
+  const p = parseCli(["tab", "close", "--mine"]);
+  assert.equal(p.ok, false);
+  assert.match(p.error, /-s NAME/);
+  assert.match(p.error, /--all-agents/);
+});
+
+test("ff tab close --all-agents [--dry-run] → close_agent_tabs across every agent; not with -s", () => {
+  assert.deepEqual(steps(["tab", "close", "--all-agents"]).steps, [{ tool: "close_agent_tabs", args: {} }]);
+  assert.deepEqual(steps(["tab", "close", "--all-agents", "--dry-run"]).steps, [
+    { tool: "close_agent_tabs", args: { dryRun: true } },
+  ]);
+  for (const argv of [["-s", "probe", "tab", "close", "--all-agents"], ["tab", "close", "--all-agents", "--mine"], ["tab", "close", "--all-agents", "--here"]]) {
+    assert.equal(parseCli(argv).ok, false, argv.join(" "));
   }
 });
 

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Lets coding agents and MCP clients drive your signed-in Firefox, via the ff CLI or an MCP server, in background tabs.",
+  "description": "Lets coding agents and MCP clients drive your signed-in Firefox, via the ff CLI or an MCP server, in a window of their own.",
   "license": "MIT",
   "engines": {
     "node": ">=20"

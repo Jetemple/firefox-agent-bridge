@@ -14,7 +14,7 @@ import { SESSION_NAME_RE, SESSION_NAME_HINT } from "./sessions.mjs";
 
 const tabId = z
   .number()
-  .describe("Optional: tab ID. Defaults to the agent tab (the one navigate drives); the active tab before the first navigate.")
+  .describe("Optional: tab ID. Defaults to this session's tab (the one navigate opened); an error before the first navigate (never the tab the user is viewing).")
   .optional();
 
 const tabIds = z
@@ -63,7 +63,7 @@ export const TOOLS = [
   {
     name: "group_tabs",
     description:
-      "Put tabs in a tab group by title: joins the group with that title (case-insensitive) or creates it. Never changes the active tab. Omit tabId/tabIds for the agent tab.",
+      "Put tabs in a tab group by title: joins the group with that title (case-insensitive) or creates it. Never changes the active tab. Omit tabId/tabIds for this session's tab (the one navigate opened).",
     inputSchema: {
       group: groupName.describe("Group title to join or create."),
       tabId,
@@ -74,30 +74,30 @@ export const TOOLS = [
   },
   {
     name: "ungroup_tabs",
-    description: "Take tabs out of their tab group. Omit tabId/tabIds for the agent tab.",
+    description: "Take tabs out of their tab group. Omit tabId/tabIds for this session's tab (the one navigate opened).",
     inputSchema: { tabId, tabIds },
   },
   {
     name: "navigate",
     description:
-      "Load a URL without switching the user's view. Omit tabId to drive the agent tab (reused across calls; opened in the background if needed); specify tabId to navigate that tab.",
+      "Load a URL without switching the user's view. Omit tabId to drive this session's own tab (the first call opens it in the background; later calls reuse it); specify tabId to navigate that tab. Start here: other tools without a tabId use this tab.",
     inputSchema: {
       url: z.string().min(1).describe("URL to navigate to (with or without protocol)"),
       tabId: z
         .number()
-        .describe("Optional: ID of an existing tab to navigate. If omitted, uses the agent tab.")
+        .describe("Optional: ID of an existing tab to navigate. If omitted, uses this session's tab.")
         .optional(),
     },
   },
   {
     name: "open_tab",
     description:
-      "Open a URL in a new tab WITHOUT focusing it (set active: true to focus). Returns the new tabId.",
+      "Open a URL in a new tab in the agent window (a separate Firefox window, never the user's) and return its tabId; pass that tabId to later calls. active: true opens it in front in the user's window, only when the user asks and only if they turned focus on in the extension panel; otherwise it opens in the agent window like any other tab.",
     inputSchema: {
       url: z.string().min(1).describe("URL to open (with or without protocol)"),
       active: z
         .boolean()
-        .describe("Focus the new tab. Default: false — agents must not steal the user's focus.")
+        .describe("Open in front in the user's window. Default: false. Ignored unless the user turned focus on in the extension panel.")
         .optional(),
       label: z
         .string()
@@ -113,7 +113,7 @@ export const TOOLS = [
       groupColor: groupColor.describe("Optional: color for the group (applies to an existing group too).").optional(),
       agentWindow: z
         .boolean()
-        .describe("Open the tab in the dedicated agent window (created unfocused if missing or closed), not the user's window. Its tabs open in the background; front one with activate_tab focusWindow: false. Ignores active.")
+        .describe("No longer needed: tabs open in the agent window by default. Kept for older callers; ignores active.")
         .optional(),
     },
   },
@@ -193,23 +193,23 @@ export const TOOLS = [
   },
   {
     name: "close_tab",
-    description: "Close a tab. Omit tabId to close the agent tab.",
+    description: "Close a tab. Omit tabId to close this session's tab. Close only tabs you opened.",
     inputSchema: { tabId },
   },
   {
     name: "activate_tab",
-    description: "Bring a tab to the foreground (activate it and focus its window). The only tool that changes what the user sees; omit tabId to show the agent tab. focusWindow: false makes it the front tab of its window without raising the window or taking focus (for pages that only render in the front tab, e.g. in the agent window).",
+    description: "Make a tab the front tab of its window and raise the window. Both take the user's focus, so they happen only if the user turned focus on in the extension panel; otherwise the result is activated:false with a note. (Your tab in the agent window is fronted for you before each command; you don't need this for that.) Use it only when the user asks to see a tab. Omit tabId for this session's tab.",
     inputSchema: {
       tabId,
       focusWindow: z
         .boolean()
-        .describe("Raise and focus the tab's window. Default: true. false fronts the tab inside its window only.")
+        .describe("Raise and focus the tab's window. Default: true. false fronts the tab inside its window only. Either way nothing happens unless the user turned focus on in the extension panel.")
         .optional(),
     },
   },
   {
     name: "reload",
-    description: "Reload a tab. Omit tabId for the agent tab.",
+    description: "Reload a tab. Omit tabId for this session's tab (the one navigate opened).",
     inputSchema: {
       tabId,
       bypassCache: z
@@ -220,12 +220,12 @@ export const TOOLS = [
   },
   {
     name: "back",
-    description: "Navigate a tab back in its session history. Omit tabId for the agent tab.",
+    description: "Navigate a tab back in its session history. Omit tabId for this session's tab (the one navigate opened).",
     inputSchema: { tabId },
   },
   {
     name: "forward",
-    description: "Navigate a tab forward in its session history. Omit tabId for the agent tab.",
+    description: "Navigate a tab forward in its session history. Omit tabId for this session's tab (the one navigate opened).",
     inputSchema: { tabId },
   },
   {
