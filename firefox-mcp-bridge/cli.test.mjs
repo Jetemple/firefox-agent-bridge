@@ -737,7 +737,15 @@ test("ff text warns when a background tab rendered almost nothing", async () => 
   const c = await stubOwnerContext({ results: { get_page_text: { text: "", length: 0, background: true } } });
   const code = await runCli(["-s", "research", "text"], c.overrides);
   assert.equal(code, 0);
-  assert.match(c.err.join(""), /background tab.*--agent-window/s);
+  assert.match(c.err.join(""), /background tab.*agent window/s);
+});
+
+test("ff text says a dialog is in the way when Firefox would not front the tab", async () => {
+  const c = await stubOwnerContext({ results: { get_page_text: { text: "", length: 0, background: true, frontBlocked: true } } });
+  const code = await runCli(["-s", "research", "text"], c.overrides);
+  assert.equal(code, 0);
+  assert.match(c.err.join(""), /would not bring it to the front.*dialog/s);
+  assert.doesNotMatch(c.err.join(""), /ff open/);
 });
 
 test("ff text stays quiet for a background tab that rendered fine, or a front tab that is short", async () => {
@@ -787,6 +795,46 @@ test("ff open --agent-window puts the extension's warning on stderr", async () =
   assert.equal(code, 0);
   assert.match(c.out.join(""), /tab 55 in agent window 9/);
   assert.match(c.err.join(""), /warning: The agent window is minimized/);
+});
+
+test("plain ff open passes on the extension's warning and note", async () => {
+  const c = await stubOwnerContext({
+    results: { open_tab: { tabId: 55, windowId: 9, url: "https://x.com", agentWindow: true, warning: "The agent window is minimized" } },
+  });
+  assert.equal(await runCli(["open", "x.com"], c.overrides), 0);
+  assert.match(c.err.join(""), /warning: The agent window is minimized/);
+  const off = await stubOwnerContext({
+    results: { open_tab: { tabId: 55, windowId: 9, url: "https://x.com", agentWindow: true, note: "Opened in the background: taking focus is off." } },
+  });
+  assert.equal(await runCli(["open", "x.com", "--foreground"], off.overrides), 0);
+  assert.match(off.err.join(""), /note: Opened in the background: taking focus is off/);
+  assert.equal(off.out.join("").trim(), "tab 55 in agent window 9");
+});
+
+test("plain ff open warns when an old extension put the tab in the user's window", async () => {
+  const c = await stubOwnerContext({ results: { open_tab: { tabId: 55, url: "https://x.com" } } });
+  assert.equal(await runCli(["open", "x.com"], c.overrides), 0);
+  assert.match(c.err.join(""), /older than 0\.2\.8.*opened in your window/);
+  const front = await stubOwnerContext({ results: { open_tab: { tabId: 55, url: "https://x.com" } } });
+  await runCli(["open", "x.com", "--foreground"], front.overrides);
+  assert.equal(front.err.join(""), "", "--foreground with focus allowed is meant to land in front");
+});
+
+test("ff nav puts the extension's agent-window warning on stderr", async () => {
+  const c = await stubOwnerContext({
+    results: { navigate: { tabId: 55, url: "https://x.com", warning: "The agent window is minimized" } },
+  });
+  assert.equal(await runCli(["nav", "x.com"], c.overrides), 0);
+  assert.match(c.err.join(""), /warning: The agent window is minimized/);
+});
+
+test("ff tab activate says on stderr when focus is off and nothing was switched", async () => {
+  const c = await stubOwnerContext({
+    results: { activate_tab: { activated: false, tabId: 55, windowId: 9, windowFocused: false, note: "Not switched: taking focus is off" } },
+  });
+  assert.equal(await runCli(["tab", "activate", "--tab", "55"], c.overrides), 0);
+  assert.match(c.err.join(""), /note: Not switched: taking focus is off/);
+  assert.equal(JSON.parse(c.out.join("")).activated, false);
 });
 
 test("ff open --agent-window warns when the extension is too old to honor it", async () => {

@@ -32,12 +32,20 @@
         white-space: pre-wrap;
         word-break: break-word;
       }
+      label {
+        display: block;
+        margin-top: 10px;
+      }
     </style>
   </head>
   <body>
     <h1>Agent Bridge for Firefox</h1>
     <div id="state">unknown</div>
     <pre id="status"></pre>
+    <label>
+      <input type="checkbox" id="allow-focus" />
+      Let agents take focus (raise Firefox, switch or open tabs in front of mine)
+    </label>
     <script src="panel.js"></script>
   </body>
 </html>

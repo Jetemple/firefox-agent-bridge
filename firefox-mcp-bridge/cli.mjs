@@ -466,19 +466,29 @@ export async function runCli(argv, overrides = {}) {
     // only the visible tab (X, YouTube, ...). Hint on stderr; stdout stays clean.
     if (parsed.command === "text") {
       const read = results[results.length - 1].result;
-      if (read?.background && (read.length ?? read.text?.length ?? 0) < EMPTY_READ_CHARS) {
-        deps.stderr("warning: this background tab rendered almost no text; some sites only render a visible tab. Open it with `ff open <url> --as NAME --agent-window` and read it there.\n");
+      const nearEmpty = (read?.length ?? read?.text?.length ?? 0) < EMPTY_READ_CHARS;
+      if (read?.frontBlocked && nearEmpty) {
+        deps.stderr("warning: this tab rendered almost no text, and Firefox would not bring it to the front of the agent window. A dialog is probably open over that window: close it there, then read again.\n");
+      } else if (read?.background && nearEmpty) {
+        deps.stderr("warning: this background tab rendered almost no text; some sites only render a visible tab. Open it with `ff open <url> --as NAME` (agent tabs open in the agent window) and read it there.\n");
       }
     }
 
-    // Agent-window caveats go to stderr so stdout stays parseable.
-    if (parsed.command === "open" && parsed.flags.agentWindow) {
+    // Where the tab really landed goes to stderr so stdout stays parseable.
+    if (parsed.command === "open") {
       const opened = results[results.length - 1].result;
-      if (!opened?.agentWindow) {
+      if (parsed.flags.agentWindow && !opened?.agentWindow) {
         deps.stderr("warning: the Firefox extension predates --agent-window, so the tab opened in your window: reload the extension and retry\n");
-      } else if (opened.warning) {
-        deps.stderr(`warning: ${opened.warning}\n`);
+      } else if (!parsed.flags.foreground && !opened?.agentWindow) {
+        deps.stderr("warning: the Firefox extension is older than 0.2.8, so the tab opened in your window, not the agent window: update the extension\n");
       }
+    }
+    // What the extension said about focus or the agent window, for every
+    // command that can open or front a tab.
+    if (["open", "nav", "tab"].includes(parsed.command)) {
+      const first = results[0].result;
+      if (first?.warning) deps.stderr(`warning: ${first.warning}\n`);
+      if (first?.note) deps.stderr(`note: ${first.note}\n`);
     }
 
     if (parsed.command === "open" && parsed.flags.as) {

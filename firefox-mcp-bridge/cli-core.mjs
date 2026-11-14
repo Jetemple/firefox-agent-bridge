@@ -7,7 +7,7 @@ import { SESSION_NAME_RE, SESSION_NAME_HINT } from "./sessions.mjs";
 const GLOBAL_BOOL = new Set(["json", "no-autostart", "replace", "here", "settle"]);
 const GLOBAL_VALUE = new Set(["session", "profile", "timeout", "wait-for", "wait-timeout"]);
 const BOOL_FLAGS = new Set([
-  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "mine", "dry-run", "ctrl", "alt", "shift", "meta", "foreground", "collapse", "expand", "no-focus", "agent-window",
+  ...GLOBAL_BOOL, "hard", "jpeg", "clear", "focused", "by-text", "mine", "all-agents", "dry-run", "ctrl", "alt", "shift", "meta", "foreground", "collapse", "expand", "no-focus", "agent-window",
 ]);
 
 function tokenize(argv) {
@@ -115,8 +115,15 @@ const BUILDERS = {
   },
   tab: (pos, flags) => {
     if (flags["no-focus"] && pos[0] !== "activate") throw new UsageError("--no-focus goes with ff tab activate");
-    if (pos[0] === "close" && flags.mine) {
-      if (flags.tab != null || flags.here) throw new UsageError("--mine closes every agent-opened tab; drop --tab/--here");
+    if (pos[0] === "close" && (flags.mine || flags["all-agents"])) {
+      if (flags.mine && flags["all-agents"]) throw new UsageError("pick one: --mine (your session's tabs) or --all-agents");
+      if (flags.tab != null || flags.here) throw new UsageError("--mine/--all-agents close agent-opened tabs; drop --tab/--here");
+      // Other agents share this browser: "mine" means this session's tabs,
+      // so it needs the session; every agent's tabs is a separate, explicit flag.
+      if (flags.mine && flags.session == null) {
+        throw new UsageError("--mine needs your session: ff -s NAME tab close --mine (or --all-agents to close every agent's tabs)");
+      }
+      if (flags["all-agents"] && flags.session != null) throw new UsageError("--all-agents is every agent's tabs; drop -s");
       return [{ tool: "close_agent_tabs", args: flags["dry-run"] ? { dryRun: true } : {} }];
     }
     if (pos[0] === "close") return [{ tool: "close_tab", args: withTab({}, flags) }];
@@ -125,7 +132,7 @@ const BUILDERS = {
       if (flags["no-focus"]) args.focusWindow = false;
       return [{ tool: "activate_tab", args }];
     }
-    throw new UsageError("usage: ff tab close|activate [--tab N] [--no-focus], or ff tab close --mine [--dry-run]");
+    throw new UsageError("usage: ff tab close|activate [--tab N] [--no-focus], or ff -s NAME tab close --mine [--dry-run], or ff tab close --all-agents [--dry-run]");
   },
   reload: (pos, flags) => {
     const args = withTab({}, flags);
@@ -179,9 +186,9 @@ const BUILDERS = {
     return [{ tool: "get_tables", args }];
   },
   open: (pos, flags) => {
-    if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--container C] [--group G [--color C]] [--profile P] [--foreground | --agent-window]");
+    if (!pos[0]) throw new UsageError("usage: ff open <url> [--as NAME] [--container C] [--group G [--color C]] [--profile P] [--foreground]");
     if (flags.foreground && flags["agent-window"]) {
-      throw new UsageError("--agent-window keeps your focus; drop --foreground (front its tab with ff tab activate --no-focus)");
+      throw new UsageError("--agent-window (now the default) keeps your focus; drop --foreground");
     }
     const args = { url: pos[0], active: !!flags.foreground };
     if (flags["agent-window"]) args.agentWindow = true;
@@ -362,6 +369,7 @@ export function parseCli(argv) {
         profile: flags.profile,
         as: flags.as,
         agentWindow: !!flags["agent-window"],
+        foreground: !!flags.foreground,
       };
     }
 
@@ -500,9 +508,9 @@ export function usageText() {
 
 Bridge:  ff status | start [--replace] | stop | ping
 Tabs:    ff tabs                        ff tab close|activate [--tab N] [--no-focus]
-         ff tab close --mine [--dry-run]  close every tab the agent opened
+         ff -s NAME tab close --mine | ff tab close --all-agents [--dry-run]  yours | every agent's
          ff nav <url> [--tab N]         ff reload [--hard] | back | forward
-         ff open <url> [--as NAME] [--container C] [--foreground | --agent-window]
+         ff open <url> [--as NAME] [--container C] [--foreground]
          ff containers                  list containers (by name or id for --container)
          ff open <url> --group G [--color C]  open straight into a tab group
          ff groups                      ff group <name> [TAB_ID...] [--color C] [--collapse|--expand]
@@ -520,14 +528,14 @@ Act:     ff click <query> [--css SEL] | --at X,Y     (also: hover, dblclick, rcl
          ff drag --from X,Y --to X,Y
          ff select <css> <value> [--by-text]         ff check|uncheck <css>
 
-Commands run in the agent tab (🤖), a background tab \`ff nav\` opens and reuses —
-your view never switches. --here targets the tab you're viewing instead;
-\`ff tab activate\` brings the agent tab into view.
-Every agent shares that one tab. If other agents may be running, take your own:
-\`ff open <url> --as NAME\` (a name unique to you), then \`ff -s NAME\` on every command.
-Pages that render only as the front tab (X, YouTube, most feeds): \`ff open <url> --as NAME
---agent-window\` puts the tab in a separate agent window that stays behind your apps; every
-command fronts the tab there first. Don't minimize that window: reads fail (WINDOW_MINIMIZED).
+Other agents share this browser. Take your own tab: \`ff open <url> --as NAME\` (a name
+unique to you), then \`ff -s NAME\` on every command, and \`ff -s NAME tab close --mine\`
+when done. Without -s, commands run in the shared agent tab (🤖) \`ff nav\` opens and
+reuses, and fail until it exists. --here (the tab the user is viewing) is only on request.
+Agent tabs open in the agent window, a separate Firefox window behind the user's apps; every
+command fronts its tab there first (never a tab the user put there). Don't minimize it: reads
+fail (WINDOW_MINIMIZED). --foreground and \`ff tab activate\` take the user's focus only if
+they turned that on in the extension panel; otherwise nothing comes to the front.
 <query> matches visible text/aria-label/placeholder (find_element), in iframes and
 shadow roots too; add --css to scope. A click whose target is covered fails without
 clicking; --at X,Y clicks whatever is at that point. "tabHidden" in a result means

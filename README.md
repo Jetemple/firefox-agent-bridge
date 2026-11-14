@@ -1,7 +1,7 @@
 # Agent Bridge for Firefox
 
-Let coding agents and MCP clients drive the Firefox you're signed into, in background
-tabs, without touching the tab you're on. Use the `ff` CLI from any shell agent, or connect
+Let coding agents and MCP clients drive the Firefox you're signed into, in a window of
+their own, without touching the tab you're on. Use the `ff` CLI from any shell agent, or connect
 an MCP client.
 
 > **Trust:** anything that can run `ff` or reach the MCP endpoint can act as you on every
@@ -24,7 +24,7 @@ Install the signed extension from the [latest release](https://github.com/Jetemp
 
 ```bash
 ff status            # bridge + extension
-ff nav example.com   # opens in a background 🤖 tab
+ff nav example.com   # opens a 🤖 tab in the agent window
 ff text              # read it
 ```
 
@@ -36,32 +36,37 @@ Add to your `CLAUDE.md` / `AGENTS.md`:
 
 ```markdown
 You can drive my logged-in Firefox with `ff` (run `ff --help` once). It works in its
-own background tab; use `--here` only when I ask about the page I'm on. `nav` returns
+own window, behind my apps; use `--here` only when I ask about the page I'm on. `nav` returns
 before the page loads: add `--settle` to wait for it. `click` doesn't wait either, so
 verify with `ff text`. Every agent shares that tab, so if other agents may be running,
 open your own with `ff open <url> --as <unique-name>` and pass `-s <unique-name>` on
 every command.
 ```
 
-### Sites that only render the front tab
+### The agent window
 
-Some sites (X, YouTube, most feeds) render nothing in a background tab. Give them a tab in
-the agent window, a separate Firefox window the bridge opens without focusing it. Each new
-tab there opens as the window's front tab, and every command fronts its tab first, so
-several agents can share the window. Fronting a tab never focuses the window.
+Agent tabs open in the agent window, a separate Firefox window the bridge opens without
+focusing it, so your own window is left alone. Each new tab there opens as the window's
+front tab, and every command fronts its tab first, so several agents can share the window
+and sites that only render the front tab (X, YouTube, most feeds) work. Fronting a tab
+never focuses the window, and while you are working in that window, or have a tab of your
+own in front there, agents leave its front tab alone.
 
 ```bash
-ff open x.com --as scrape --agent-window   # creates the window if it's missing or closed
+ff open x.com --as scrape    # in the agent window; creates it if it's missing or closed
 ff -s scrape text
-ff -s scrape tab close                     # the window's last tab leaves a blank tab, so it stays
+ff -s scrape tab close       # the window's last tab leaves a blank tab, so it stays
 ```
 
-A near-empty `ff text` from a background tab elsewhere prints a hint to use the agent window.
-
 Leave the agent window behind other windows rather than minimizing it: a minimized window
-doesn't render, so reads fail with `WINDOW_MINIMIZED`. On macOS, creating the window brings
-Firefox forward once; the bridge never focuses your windows, and it tags the agent window so
-it finds it again after an extension reload instead of making a new one.
+doesn't render, so reads fail with `WINDOW_MINIMIZED`. The window is made when Firefox
+starts. If you close it, the next agent command makes a new one, and on macOS that brings
+Firefox forward once.
+
+Agents can't take your focus unless you allow it: `ff open --foreground` and
+`ff tab activate` only switch the tab you're viewing or bring Firefox to the front when
+"Let agents take focus" is ticked in the extension's toolbar panel. It is off by default,
+and agents have no command that changes it.
 
 To have an agent set this up or change the code, point it at [AGENTS.md](AGENTS.md).
 

@@ -41,9 +41,11 @@
     }
   }
 
-  // Put tabs in the group titled `name` (case-insensitive), creating it in the
-  // first tab's window if there is none. With several matches, the one in that
-  // window wins. Returns what the group looks like afterwards.
+  // Put tabs in the group titled `name` (case-insensitive) in the first tab's
+  // window, creating it there if that window has none. A same-named group in
+  // another window is never joined: that would move the tab to that window
+  // (an agent tab into the user's, or the reverse).
+  // Returns what the group looks like afterwards.
   // Fails before anything changes: open_tab calls this before opening a tab.
   FF.checkGroupArgs = ({ name, color } = {}) => {
     requireApi();
@@ -59,7 +61,7 @@
 
     const windowId = tabs[0].windowId;
     const matches = (await queryGroups()).filter((g) => (g.title ?? "").toLowerCase() === title.toLowerCase());
-    const existing = matches.find((g) => g.windowId === windowId) ?? matches[0];
+    const existing = matches.find((g) => g.windowId === windowId);
     const tabIds = tabs.map((t) => t.id);
     const groupId = existing
       ? await browser.tabs.group({ tabIds, groupId: existing.id })

@@ -315,6 +315,7 @@ test("a hello-less connection classifies as default after the grace period", asy
   assert.deepEqual(relay.profiles()[0], {
     name: "default",
     runId: null,
+    version: null,
     connectedAt: relay.profiles()[0].connectedAt,
   });
   const r = await relay.dispatch("get_page_text", {}); // sole connection: no profile needed

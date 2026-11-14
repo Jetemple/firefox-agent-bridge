@@ -78,7 +78,7 @@ test("group_tabs creates and titles a group when none has that name", async () =
 
 test("group_tabs joins an existing group by title, case-insensitively, without renaming it", async () => {
   const { FF, state } = fakeFirefox({
-    tabs: [{ id: 5 }, { id: 7, groupId: 3 }],
+    tabs: [{ id: 5, windowId: 1 }, { id: 7, groupId: 3, windowId: 1 }],
     groups: [{ id: 3, title: "Research", color: "purple", collapsed: false, windowId: 1 }],
   });
   const res = await FF.tools.group_tabs({ group: "research", tabId: 5 });
@@ -98,6 +98,17 @@ test("group_tabs prefers the same-titled group in the tab's own window", async (
   });
   await FF.tools.group_tabs({ group: "Work", tabId: 5 });
   assert.equal(state.calls[0][1].groupId, 4);
+});
+
+test("group_tabs never joins a same-titled group in another window", async () => {
+  // Joining it would move the tab there: an agent tab into the user's window.
+  const { FF, state } = fakeFirefox({
+    tabs: [{ id: 5, windowId: 2 }],
+    groups: [{ id: 3, title: "Work", windowId: 1 }],
+  });
+  const res = await FF.tools.group_tabs({ group: "Work", tabId: 5 });
+  assert.deepEqual(j(state.calls[0]), ["group", { tabIds: [5], createProperties: { windowId: 2 } }]);
+  assert.equal(res.created, true);
 });
 
 test("group_tabs defaults to the agent tab and can collapse the group", async () => {
